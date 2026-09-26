@@ -1,0 +1,33 @@
+repository:
+  name: PhiZero
+  url: https://github.com/yaoyao-jpg/PhiZero.git
+  commit: 2d1b3e83a139027b01aadd41be6c6052bf76fd3a
+  clone_depth: 1
+  downloaded_at_utc: 2026-09-26
+paper:
+  local_pdf: /home/bubble/类脑计算/参考/WAM/PHIZERO.pdf
+  arxiv: https://arxiv.org/abs/2607.28624
+software_contract:
+  torch: 2.6.0+cu124
+  torchvision: 0.21.0+cu124
+  transformers: 5.12.1
+  flash_attention: 2.8.3
+  environments:
+    - environments/phizero-reasoner.yml
+    - environments/phizero-decoder.yml
+external_assets:
+  phizero_checkpoint: https://huggingface.co/ShuyaoShang/PhiZero
+  wan_dit: https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B
+  wan_vae: https://modelscope.cn/models/DiffSynth-Studio/Wan-Series-Converted-Safetensors
+status:
+  code_download: complete
+  static_audit: complete
+  environment_install: pending
+  checkpoint_download: pending
+  smoke_test: pending
+smoke_test:
+  host_python: 3.8.10
+  required_python: ">=3.10"
+  python310_compileall: passed
+  import_test: pending
+  gpu_inference: pending

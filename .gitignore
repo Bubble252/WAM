@@ -1,0 +1,9 @@
+# External source snapshot is kept locally and is not committed into the WAM project.
+references/repos/PhiZero/
+# Large model/data/runtime artifacts.
+references/checkpoints/
+outputs/
+logs/
+*.safetensors
+*.ckpt
+*.pth
