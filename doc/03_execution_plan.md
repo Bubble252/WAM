@@ -141,6 +141,63 @@ git commit -m "feat: evaluate non-pixel future-state prediction"
 git push
 ```
 
+## 6.1 推荐训练配方
+
+### Stage 0：数据与表示准备
+
+- [ ] 用仿真轨迹建立 `(observation, action, state, event, next_state)` manifest；
+- [ ] 用 PISA/Kubric 视频建立外观变化与掉落运动的预训练/验证 split；
+- [ ] 训练或冻结 transition encoder，检查同一运动换首帧、同一首帧换运动的表示距离；
+- [ ] 离散 token 必须记录 codebook usage、perplexity、重复率和 scene/motion probe。
+
+### Stage 1：教师强制的动作条件多步预测
+
+定义长度为 `H` 的转移目标 `z_{t+1:t+H}`，先用真实历史和真实动作做 teacher forcing：
+
+```text
+L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_t, a_{t:t+h-1}, z_{t+1:t+h-1}))
+```
+
+连续 latent 或结构化状态可以把 `CE` 换成 masked regression/event loss。必须与 one-step baseline 对照，不能只展示训练 loss。
+
+### Stage 2：处理 rollout 漂移
+
+- [ ] 先做 scheduled sampling：逐步提高历史预测 token 的比例；
+- [ ] 独立做 DAgger：让模型在仿真中 rollout，访问这些偏离专家分布的状态，再由 MuJoCo/ManiSkill oracle 提供状态/后果标签并聚合数据；
+- [ ] 不要在首轮同时使用 scheduled sampling 和 DAgger，否则无法知道收益来自哪里；
+- [ ] 历史 token 加噪只作为第三个鲁棒性消融。
+
+### Stage 3：闭环 MPC 评估
+
+每次只执行一步或短动作 chunk，重新读取观测，再预测下一轮后果。报告开放环 rollout 与闭环 rollout 的差距、动作排序准确率、成功率、状态误差和每步延迟。RAG 只作为无检索/有检索对照，不进入主模型定义。
+
+### Stage 4：物理残差和 token 稳定性
+
+- [ ] 离散 tokenizer 才启用熵正则，并报告词表利用率而非只报总 loss；
+- [ ] 仿真器有质量、速度、接触和外力时，再启用能量/动量残差；
+- [ ] 对摩擦、碰撞、动作做功和外力显式建模，不能默认“总能量恒定”；
+- [ ] token 重复惩罚只在固定 horizon 自回归解码出现重复时启用。
+
+## 6.2 PISA Experiments 的正确角色
+
+PISA 很适合验证“模型是否理解掉落/碰撞/运动后果”，但不能单独支撑完整的动作条件 WAM：
+
+- `pisabench/real.zip`：361 个真实掉落视频，适合作为真实物理泛化测试；不含完整动作、质量、三维状态或 MuJoCo oracle，不能直接做 DAgger；
+- `pisabench/sim.zip`：60 个仿真测试视频，含 seen/unseen object-background split 和 segmentation mask，适合作为 sim2real/组合泛化测试；
+- `training_data/psft.zip` 与 `training_data/oro.zip`：用于 PISA 的视频扩散 post-training，适合作为视频/物理表示预训练或渲染对照，但需先检查是否有动作和状态字段；
+- PISA 仿真基于 Kubric/PyBullet/Blender，不是 MuJoCo，因此不能把 PISA 的 mask 当成 DAgger 所需的动力学真值。
+
+推荐数据分工：
+
+| 数据 | 训练/评估角色 | 可支持的结论 |
+|---|---|---|
+| PISA/Kubric simulation | transition encoder、掉落事件预训练 | 表示能否编码运动/碰撞 |
+| MuJoCo、ManiSkill 或 DM Control 自生成轨迹 | MCP、scheduled sampling、DAgger、MPC | 动作条件预测和闭环控制 |
+| LIBERO/RoboMimic | 机器人视觉-动作迁移 | 操作任务的 action-conditioned 泛化 |
+| PISA real | 真实视觉物理 hold-out | sim2real 的掉落/碰撞合理性 |
+
+PISA 的视频指标主要面向生成视频。若主模型不生成像素，必须把模型输出映射到 object trajectory、contact/event 或 mask-level 预测，再报告状态/事件/规划指标；不能用视频 FVD 代替非像素世界模型评价。
+
 ## 7. P4：反事实动作和规划
 
 - [ ] 对同一观测生成多个候选动作；
