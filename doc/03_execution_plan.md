@@ -12,7 +12,8 @@
 
 ```bash
 cd /home/bubble/类脑计算/WAM终局
-git init -b main
+git init
+git checkout -b main
 git add doc
 git commit -m "docs: define WAM physical-language research plan"
 ```
@@ -55,7 +56,8 @@ git push  # 只有已配置 origin 且用户希望同步时执行
 - [x] 生成本执行计划，写明每步验收、commit 和 push；
 - [x] 明确首选 idea：physical-language-only + consequence-only；
 - [x] 记录 PhiZero 的限制：经验性符号、视觉不可观测状态、固定时长和算力成本；
-- [ ] 与用户确认是否初始化独立 Git、真实远端、首轮环境和算力预算。
+- [x] 已初始化独立本地 Git 并提交文档和审计清单；
+- [ ] 与用户确认真实远端、首轮环境和算力预算。
 
 ### P0 验收
 
@@ -65,7 +67,8 @@ git push  # 只有已配置 origin 且用户希望同步时执行
 
 ```bash
 cd /home/bubble/类脑计算/WAM终局
-git init -b main
+git init
+git checkout -b main
 git add doc
 git commit -m "docs: define WAM physical-language research plan"
 git remote add origin <真实远端地址>  # 仅在用户提供后执行

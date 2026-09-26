@@ -93,7 +93,9 @@ PhiZero 当前仍是数据驱动的经验性状态转移表示，不是可解释
 
 ## 6. 待确认事项
 
-1. `WAM终局` 是否需要初始化为独立 Git 仓库并推送到已有远端，还是只在本地保留；
+相关路线的调查记录见 [`references/manifests/literature_scan.md`](../references/manifests/literature_scan.md)，其中区分了 latent video prediction、latent-action world model、事件/物理推理、视频 tokenizer 和 PhiZero physical language。
+
+1. `WAM终局` 已初始化独立本地 Git；是否需要绑定并推送到已有远端；
 2. 首轮环境优先选 LIBERO/BridgeData 类机器人数据、视频物理数据，还是先用可控的 2D/小型仿真环境；
 3. 目标是先做 idea 设计与 smoke test，还是立即进入完整训练和论文复现；
 4. 可用 GPU、存储和网络代理条件决定是否下载大模型、视频数据和 Wan/PhiZero 相关权重。
