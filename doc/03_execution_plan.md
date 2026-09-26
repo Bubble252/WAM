@@ -141,7 +141,87 @@ git commit -m "feat: evaluate non-pixel future-state prediction"
 git push
 ```
 
-## 6.1 推荐训练配方
+## 6.1 无像素 rollout 与 PhiZero 的公平比较协议
+
+本项目不把“是否生成未来像素”直接当作优劣标准。PhiZero 的完整系统是“物理语言 reasoner + 视频 diffusion decoder”，适合评价未来视频生成；本项目的 consequence-only 模型不生成未来视频，主要评价动作后果预测、反事实规划、闭环控制和推理效率。因此主问题应固定为：
+
+> 在相同当前观测和动作候选下，模型能否准确预测动作后果，并以更低成本支持闭环控制？
+
+### 统一输入和接口
+
+所有模型在时刻 `t` 接收相同的当前观测 `o_t`、动作候选序列 `a_{t:t+H}`、目标 `g` 和预测 horizon `H`。
+
+```text
+当前观测 o_t + 动作候选 a_{t:t+H}
+        ↓
+未来物理状态/transition token 预测
+        ↓
+动作排序、规划或闭环执行
+```
+
+我们的模型输出 `z_hat_{t+1:t+H}` 或状态/事件后果；PhiZero baseline 可以继续通过其 decoder 生成未来视频。评价时使用统一的仿真真值、统一的目标函数和统一的动作执行器，不能用不同的输入或不同的规划规则制造优势。
+
+### 四个必须同时报告的模型
+
+| 模型 | 未来像素 | 每步重新观测 | 用途 |
+|---|---:|---:|---|
+| PhiZero full | 是 | 可选 | 生成式强基线 |
+| Ours-open-loop | 否 | 否 | 测试 MCP 单独的多步预测能力 |
+| Ours-closed-loop | 否 | 是 | 测试 MCP + MPC 重锚定 |
+| Ours-closed-loop + DAgger | 否 | 是 | 测试纠错训练的额外收益 |
+
+必须同时画出开放环和闭环随 horizon 增长的误差曲线。若闭环有效，`Ours-closed-loop` 的误差累积和任务失败率应低于 `Ours-open-loop`。
+
+### 三类评价指标
+
+1. **物理后果预测**
+   - 位置、速度和相对距离误差；
+   - 接触、碰撞、掉落、停止等事件 F1；
+   - 事件发生时间误差；
+   - 长时域误差增长；
+   - 不确定性校准。
+
+2. **反事实动作规划**
+   - 候选动作排序准确率；
+   - 目标到达率、碰撞风险和终止状态预测；
+   - planner 选择的动作在真实环境中的实际回报；
+   - closed-loop success rate、episode return 和失败率。
+
+3. **效率和系统代价**
+   - 单步规划延迟；
+   - 每秒可执行的规划次数；
+   - 显存峰值；
+   - 单个 episode 的总推理时间；
+   - 单次 rollout 的 FLOPs 或 GPU 时间。
+
+不要把我们的 latent/token CE 直接与 PhiZero 的视频 FVD 当作同一指标。对于物理预测，优先使用仿真器状态和外部视觉跟踪结果；对于视频生成，单独报告 PhiZero 的生成指标，或把 renderer 作为可选审计模块。
+
+### PISA、仿真和机器人数据的分工
+
+PISA/Kubric 主要用于掉落、碰撞和视觉物理表示测试；MuJoCo、ManiSkill 或 DM Control 用于动作条件 MCP、scheduled sampling、DAgger 和 MPC；LIBERO/RoboMimic 用于机器人操作迁移。PISA 没有完整的动作条件轨迹和 MuJoCo 专家 oracle，不能单独支撑 DAgger 或闭环控制结论。
+
+### 公平性设置
+
+至少报告两种结果：
+
+- **Matched-data**：PhiZero 和本方法使用相同数据、相同划分、相同动作条件、相同 horizon 和尽可能匹配的训练预算，用于比较方法本身；
+- **Official-pretrained**：直接使用 PhiZero 官方权重与本方法比较，明确标注这是完整系统能力比较，不能解释为严格架构公平比较。
+
+消融顺序固定为：
+
+```text
+PhiZero full
+Ours one-step
+Ours MCP
+Ours MCP + scheduled sampling
+Ours MCP + DAgger
+Ours MCP + closed-loop MPC
+Ours MCP + closed-loop MPC + DAgger
+```
+
+主张应限定为：PhiZero 可能更适合未来视频生成和视觉呈现；consequence-only 模型若在控制成功率、长时域闭环稳定性和推理效率上更好，则说明它更适合动作条件规划，而不是说明它在所有生成任务上都优于 PhiZero。
+
+## 6.2 推荐训练配方
 
 ### Stage 0：数据与表示准备
 
@@ -178,7 +258,7 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_t, a_{t:t+h-1}, z_{t+1:t+h-1}))
 - [ ] 对摩擦、碰撞、动作做功和外力显式建模，不能默认“总能量恒定”；
 - [ ] token 重复惩罚只在固定 horizon 自回归解码出现重复时启用。
 
-## 6.2 PISA Experiments 的正确角色
+## 6.3 PISA Experiments 的正确角色
 
 PISA 很适合验证“模型是否理解掉落/碰撞/运动后果”，但不能单独支撑完整的动作条件 WAM：
 

@@ -134,6 +134,41 @@ score = planner.evaluate_counterfactual(obs_t, action_a, goal)
 
 评价至少覆盖：动作排序准确率、multi-step state error、接触/终止事件 F1、成功率、推理延迟、显存、单位 rollout 成本和不确定性校准。
 
+### 5.4 闭环重锚定与 PhiZero 对比接口
+
+闭环不是另一个 token loss，而是 dynamics predictor 的推理方式。每轮只执行第一个动作或短动作 chunk，读取新的真实观测，再重新调用 encoder 和 dynamics：
+
+```python
+while not done:
+    z_t = encoder.encode(observation)
+    candidates = planner.sample_actions(z_t, goal)
+    futures = dynamics.predict(z_t, candidates, horizon=H)
+    action = planner.select(futures, goal)
+    observation, reward, done = env.step(action)
+```
+
+因此，“不生成未来像素”不等于“不使用视觉观测”。模型仍然在每个真实时间步读取当前观测，只是不用 diffusion decoder 合成尚未发生的画面。
+
+与 PhiZero 的统一对照接口为：
+
+```text
+同一观测 o_t + 同一动作候选 a_{t:t+H}
+    ├── PhiZero: physical-language rollout → video decoder（可选）
+    └── Ours:    physical-transition rollout
+```
+
+控制和物理预测评价使用真实仿真状态、事件标签或统一的外部跟踪器。不能因为 PhiZero 生成了视频，就只用视频观感评价它；也不能因为本模型不生成视频，就用 token 交叉熵宣称它已经理解物理。两者都必须落到位置、速度、接触、碰撞、目标完成和控制回报上。
+
+建议将以下曲线作为最小实验图：
+
+```text
+horizon H → state/event error
+horizon H → closed-loop success
+rollout length → latency and GPU cost
+```
+
+其中 `Ours-open-loop` 与 `Ours-closed-loop` 的差异用于证明重新观测和 MPC 重规划的贡献；`PhiZero full` 与 consequence-only 的差异用于展示未来像素渲染对控制准确性和系统成本的影响。
+
 ## 6. 训练数据与标签策略
 
 首轮按成本从低到高：
@@ -164,7 +199,7 @@ score = planner.evaluate_counterfactual(obs_t, action_a, goal)
 - consequence-only predictor（不渲染未来视频）；
 - oracle simulator state（仅作为上界，不作为公平 baseline）。
 
-关键消融：无 action condition、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外动作。
+关键消融：one-step、MCP、scheduled sampling、DAgger、closed-loop MPC、无 action condition、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外动作。
 
 ## 8. 可复现记录
 
