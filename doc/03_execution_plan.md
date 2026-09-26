@@ -44,10 +44,11 @@ git push  # 只有已配置 origin 且用户希望同步时执行
 | P1 | PhiZero 代码和论文接口审计 | repo 状态、依赖、入口、许可证报告 | [ ] |
 | P2 | 最小 tokenizer/表示 smoke test | token 统计、重建/预测 sanity check | [ ] |
 | P3 | 不渲染像素的 dynamics baseline | latent/物理语言 multi-step 预测 | [ ] |
-| P4 | 反事实动作与规划评价 | action ranking、state error、success | [ ] |
+| P4 | 被动物理预测评价 | multi-step error、event F1、长时域稳定性 | [ ] |
 | P5 | 结构化事件图扩展 | graph/event ablation | [ ] |
 | P6 | 可选 renderer 审计闭环 | 失败样本渲染、跨外观/embodiment | [ ] |
 | P7 | 论文级对照和结论 | 等算力表、失败案例、idea 选择 | [ ] |
+| Future | 动作条件控制 | DAgger、MPC、机器人任务 | 后置 |
 
 ## 3. P0：文档先行（当前步骤）
 
@@ -125,13 +126,13 @@ git push
 - [ ] 建立 pixel/video、VAE latent、物理语言和 consequence-only 四个 baseline；
 - [ ] 训练短 horizon，再逐步增加 rollout 长度；
 - [ ] 记录 multi-step state error、事件 F1、uncertainty calibration、延迟和显存；
-- [ ] 进行随机 token、时间错位 token、错误动作和遮挡输入的反事实测试；
-- [ ] 检查模型是否只预测动作类别而没有预测结果状态；
+- [ ] 进行随机 token、时间错位 token、历史截断和遮挡输入的反事实测试；
+- [ ] 检查模型是否只预测外观变化而没有预测物理状态和事件；
 - [ ] 把失败样本按 perception、representation、dynamics、planning 分类。
 
 ### P3 验收
 
-在同一数据和算力预算下，consequence-only 或 physical-language-only 至少能在一个控制/规划指标上达到 pixel baseline 的可比水平，同时显著降低 rollout 成本；若没有，保留负结果并停止无依据扩展。
+在同一数据和算力预算下，consequence-only 或 physical-language-only 至少能在一个未来状态、物理事件或长时域稳定性指标上达到 pixel baseline 的可比水平，同时显著降低 rollout 成本；若没有，保留负结果并停止无依据扩展。
 
 ### P3 Git
 
@@ -141,87 +142,80 @@ git commit -m "feat: evaluate non-pixel future-state prediction"
 git push
 ```
 
-## 6.1 无像素 rollout 与 PhiZero 的公平比较协议
+## 6.1 阶段一：被动无像素 rollout 与 PhiZero 的公平比较协议
 
-本项目不把“是否生成未来像素”直接当作优劣标准。PhiZero 的完整系统是“物理语言 reasoner + 视频 diffusion decoder”，适合评价未来视频生成；本项目的 consequence-only 模型不生成未来视频，主要评价动作后果预测、反事实规划、闭环控制和推理效率。因此主问题应固定为：
+当前阶段暂不研究控制，不输入动作，也不评价动作选择。PhiZero 的完整系统是“物理语言 reasoner + 视频 diffusion decoder”，适合评价未来视频生成；本项目的 Passive Physical Dynamics 不生成未来视频，主要评价被动未来状态预测、物理事件预测、长时域稳定性和推理效率。因此阶段一的主问题固定为：
 
-> 在相同当前观测和动作候选下，模型能否准确预测动作后果，并以更低成本支持闭环控制？
+> 在相同观测历史下，模型能否不生成未来像素而准确预测未来物理状态和事件，并以更低成本保持长时域稳定？
 
 ### 统一输入和接口
 
-所有模型在时刻 `t` 接收相同的当前观测 `o_t`、动作候选序列 `a_{t:t+H}`、目标 `g` 和预测 horizon `H`。
+阶段一所有模型在时刻 `t` 接收相同的当前观测或观测历史 `o_{\leq t}` 和预测 horizon `H`，不提供动作输入。
 
 ```text
-当前观测 o_t + 动作候选 a_{t:t+H}
+观测历史 o_{≤t}
         ↓
 未来物理状态/transition token 预测
         ↓
-动作排序、规划或闭环执行
+状态、轨迹和物理事件评价
 ```
 
-我们的模型输出 `z_hat_{t+1:t+H}` 或状态/事件后果；PhiZero baseline 可以继续通过其 decoder 生成未来视频。评价时使用统一的仿真真值、统一的目标函数和统一的动作执行器，不能用不同的输入或不同的规划规则制造优势。
+我们的模型输出 `z_hat_{t+1:t+H}` 或状态/事件后果；PhiZero baseline 可以继续通过其 decoder 生成未来视频。评价时使用统一的观测历史、未来状态真值、事件标签和外部跟踪器，不能把控制回报或动作排序提前混入阶段一结论。
 
-### 四个必须同时报告的模型
+### 阶段一必须报告的模型
 
-| 模型 | 未来像素 | 每步重新观测 | 用途 |
+| 模型 | 未来像素 | 重新读取真实观测 | 用途 |
 |---|---:|---:|---|
-| PhiZero full | 是 | 可选 | 生成式强基线 |
-| Ours-open-loop | 否 | 否 | 测试 MCP 单独的多步预测能力 |
-| Ours-closed-loop | 否 | 是 | 测试 MCP + MPC 重锚定 |
-| Ours-closed-loop + DAgger | 否 | 是 | 测试纠错训练的额外收益 |
+| PhiZero passive/adapted | 是 | 可选 | 生成式物理预测基线 |
+| Ours-passive-open-loop | 否 | 否 | 测试 Passive MCP 单独的多步预测能力 |
+| Ours-passive-reanchored | 否 | 是 | 测试 MCP + 观测重锚定 |
+| Pixel/video predictor | 是 | 可选 | 像素预测参考基线 |
 
-必须同时画出开放环和闭环随 horizon 增长的误差曲线。若闭环有效，`Ours-closed-loop` 的误差累积和任务失败率应低于 `Ours-open-loop`。
+必须同时画出开放环和重新观测版本随 horizon 增长的误差曲线。若重锚定有效，`Ours-passive-reanchored` 的误差累积应低于 `Ours-passive-open-loop`。这里的“闭环”只表示预测、观测、重新编码，不表示动作控制。
 
-### 三类评价指标
+### 阶段一评价指标
 
-1. **物理后果预测**
+1. **未来物理预测**
    - 位置、速度和相对距离误差；
    - 接触、碰撞、掉落、停止等事件 F1；
    - 事件发生时间误差；
    - 长时域误差增长；
    - 不确定性校准。
 
-2. **反事实动作规划**
-   - 候选动作排序准确率；
-   - 目标到达率、碰撞风险和终止状态预测；
-   - planner 选择的动作在真实环境中的实际回报；
-   - closed-loop success rate、episode return 和失败率。
-
-3. **效率和系统代价**
-   - 单步规划延迟；
-   - 每秒可执行的规划次数；
+2. **效率和系统代价**
+   - 单段未来预测延迟；
+   - 每段未来轨迹的推理时间；
    - 显存峰值；
-   - 单个 episode 的总推理时间；
    - 单次 rollout 的 FLOPs 或 GPU 时间。
 
-不要把我们的 latent/token CE 直接与 PhiZero 的视频 FVD 当作同一指标。对于物理预测，优先使用仿真器状态和外部视觉跟踪结果；对于视频生成，单独报告 PhiZero 的生成指标，或把 renderer 作为可选审计模块。
+不要把我们的 latent/token CE 直接与 PhiZero 的视频 FVD 当作同一指标。对于物理预测，优先使用仿真器状态和外部视觉跟踪结果；对于视频生成，单独报告视频基线指标，或把 renderer 作为可选审计模块。
 
 ### PISA、仿真和机器人数据的分工
 
-PISA/Kubric 主要用于掉落、碰撞和视觉物理表示测试；MuJoCo、ManiSkill 或 DM Control 用于动作条件 MCP、scheduled sampling、DAgger 和 MPC；LIBERO/RoboMimic 用于机器人操作迁移。PISA 没有完整的动作条件轨迹和 MuJoCo 专家 oracle，不能单独支撑 DAgger 或闭环控制结论。
+当前阶段以 PISA/Kubric 和其他被动视频为主，用于掉落、碰撞、轨迹和视觉物理表示测试。MuJoCo、ManiSkill、DM Control、LIBERO 和 RoboMimic 的动作条件数据暂存为后续控制阶段，不纳入阶段一主结论。
 
 ### 公平性设置
 
 至少报告两种结果：
 
-- **Matched-data**：PhiZero 和本方法使用相同数据、相同划分、相同动作条件、相同 horizon 和尽可能匹配的训练预算，用于比较方法本身；
+- **Matched-data**：PhiZero 和本方法使用相同数据、相同观测历史、相同划分、相同 horizon 和尽可能匹配的训练预算，用于比较方法本身；
 - **Official-pretrained**：直接使用 PhiZero 官方权重与本方法比较，明确标注这是完整系统能力比较，不能解释为严格架构公平比较。
 
 消融顺序固定为：
 
 ```text
-PhiZero full
-Ours one-step
-Ours MCP
-Ours MCP + scheduled sampling
-Ours MCP + DAgger
-Ours MCP + closed-loop MPC
-Ours MCP + closed-loop MPC + DAgger
+PhiZero passive/adapted
+Pixel/video predictor
+Ours one-step passive
+Ours passive MCP
+Ours passive MCP + scheduled sampling
+Ours passive MCP + history-token noise
+Ours passive MCP + observation re-anchoring
 ```
 
-主张应限定为：PhiZero 可能更适合未来视频生成和视觉呈现；consequence-only 模型若在控制成功率、长时域闭环稳定性和推理效率上更好，则说明它更适合动作条件规划，而不是说明它在所有生成任务上都优于 PhiZero。
+主张应限定为：PhiZero 可能更适合未来视频生成和视觉呈现；Passive Physical Dynamics 若在物理事件、长时域稳定性和推理效率上更好，则说明物理 token 可以在不生成未来像素的情况下承担被动预测任务。动作条件预测、DAgger、MPC 和机器人控制作为后续阶段单独验证。
 
-## 6.2 推荐训练配方
+## 6.2 推荐训练配方（阶段一：被动预测）
 
 ### Stage 0：数据与表示准备
 
@@ -230,12 +224,12 @@ Ours MCP + closed-loop MPC + DAgger
 - [ ] 训练或冻结 transition encoder，检查同一运动换首帧、同一首帧换运动的表示距离；
 - [ ] 离散 token 必须记录 codebook usage、perplexity、重复率和 scene/motion probe。
 
-### Stage 1：教师强制的动作条件多步预测
+### Stage 1：教师强制的被动多步预测
 
-定义长度为 `H` 的转移目标 `z_{t+1:t+H}`，先用真实历史和真实动作做 teacher forcing：
+定义长度为 `H` 的转移目标 `z_{t+1:t+H}`，先用真实历史和观测序列做 teacher forcing；当前阶段没有动作条件：
 
 ```text
-L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_t, a_{t:t+h-1}, z_{t+1:t+h-1}))
+L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 ```
 
 连续 latent 或结构化状态可以把 `CE` 换成 masked regression/event loss。必须与 one-step baseline 对照，不能只展示训练 loss。
@@ -243,13 +237,13 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_t, a_{t:t+h-1}, z_{t+1:t+h-1}))
 ### Stage 2：处理 rollout 漂移
 
 - [ ] 先做 scheduled sampling：逐步提高历史预测 token 的比例；
-- [ ] 独立做 DAgger：让模型在仿真中 rollout，访问这些偏离专家分布的状态，再由 MuJoCo/ManiSkill oracle 提供状态/后果标签并聚合数据；
-- [ ] 不要在首轮同时使用 scheduled sampling 和 DAgger，否则无法知道收益来自哪里；
-- [ ] 历史 token 加噪只作为第三个鲁棒性消融。
+- [ ] DAgger 暂不启用，保留到动作条件控制阶段；
+- [ ] 不要在首轮同时使用多种 rollout 扰动，否则无法知道收益来自哪里；
+- [ ] 历史 token 加噪作为 scheduled sampling 之后的鲁棒性消融。
 
-### Stage 3：闭环 MPC 评估
+### Stage 3：被动重新观测评估
 
-每次只执行一步或短动作 chunk，重新读取观测，再预测下一轮后果。报告开放环 rollout 与闭环 rollout 的差距、动作排序准确率、成功率、状态误差和每步延迟。RAG 只作为无检索/有检索对照，不进入主模型定义。
+模型不执行动作，只在预测若干步后重新读取真实观测，再预测下一轮未来状态。报告开放环与重新观测版本的状态误差、事件 F1、长时域漂移和每段推理延迟。RAG 只作为无检索/有检索对照，不进入主模型定义。
 
 ### Stage 4：物理残差和 token 稳定性
 
@@ -257,6 +251,8 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_t, a_{t:t+h-1}, z_{t+1:t+h-1}))
 - [ ] 仿真器有质量、速度、接触和外力时，再启用能量/动量残差；
 - [ ] 对摩擦、碰撞、动作做功和外力显式建模，不能默认“总能量恒定”；
 - [ ] token 重复惩罚只在固定 horizon 自回归解码出现重复时启用。
+
+动作条件的 DAgger、MPC 和控制回报评价保留到 Future 阶段，不作为当前训练配方的必需项。
 
 ## 6.3 PISA Experiments 的正确角色
 
@@ -278,8 +274,9 @@ PISA 很适合验证“模型是否理解掉落/碰撞/运动后果”，但不�
 
 PISA 的视频指标主要面向生成视频。若主模型不生成像素，必须把模型输出映射到 object trajectory、contact/event 或 mask-level 预测，再报告状态/事件/规划指标；不能用视频 FVD 代替非像素世界模型评价。
 
-## 7. P4：反事实动作和规划
+## Future：动作条件反事实规划和控制（后置）
 
+- [ ] 当前阶段不执行；
 - [ ] 对同一观测生成多个候选动作；
 - [ ] 用真实后果、仿真器或人工小样本标签验证动作排序；
 - [ ] 对目标位移、接触成立、碰撞风险、终止和不确定性分别评价；
@@ -287,11 +284,11 @@ PISA 的视频指标主要面向生成视频。若主模型不生成像素，必
 - [ ] 测试长时域闭环和分布外动作，而不是只看 one-step loss；
 - [ ] 形成 `outputs/counterfactual_report.md`，写清哪些结果支持或反驳主假设。
 
-### P4 Git
+### Future Git
 
 ```bash
 git add src/planner outputs/counterfactual_report.md configs
-git commit -m "eval: add counterfactual action consequence benchmark"
+git commit -m "eval: add action-conditioned consequence benchmark"
 git push
 ```
 
@@ -328,11 +325,11 @@ git push
 
 ## 10. P7：论文级汇总和停止条件
 
-- [ ] 所有 baseline 使用相同观测、动作、horizon、数据 split 和算力记录；
+- [ ] 阶段一 baseline 使用相同观测历史、horizon、数据 split 和算力记录；Future 阶段再统一动作条件；
 - [ ] 同时报 state prediction、counterfactual planning、closed-loop success、efficiency 和 calibration；
 - [ ] 至少保留一个失败案例集和一个负结果；
 - [ ] 对主 idea 做 novelty/related-work 检索，区分 PhiZero 的直接延伸与真正的新问题；
-- [ ] 若 consequence-only 在控制指标上不优于 latent/pixel baseline，则停止扩展并改写研究问题；
+- [ ] 若 consequence-only 在未来状态、物理事件或长时域稳定性指标上不优于 latent/pixel baseline，则停止扩展并改写研究问题；
 - [ ] 生成最终 idea 选择报告和后续论文大纲。
 
 ### P7 Git

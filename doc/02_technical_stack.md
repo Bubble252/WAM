@@ -124,7 +124,7 @@ z_future, unc = dynamics.predict(
 )
 ```
 
-最小返回值包括未来状态表示、每步不确定性、动作条件和模型版本。任何 planner 都必须能在相同 `obs_t` 下比较多个动作候选，不能只展示单次采样视频。
+最小返回值包括未来状态表示、每步不确定性和模型版本。Future 阶段加入动作条件后，再要求 planner 在相同 `obs_t` 下比较多个动作候选；阶段一不展示动作采样。
 
 ### 5.3 反事实评价
 
@@ -132,50 +132,48 @@ z_future, unc = dynamics.predict(
 score = planner.evaluate_counterfactual(obs_t, action_a, goal)
 ```
 
-评价至少覆盖：动作排序准确率、multi-step state error、接触/终止事件 F1、成功率、推理延迟、显存、单位 rollout 成本和不确定性校准。
+阶段一评价至少覆盖：multi-step state error、接触/终止事件 F1、事件时间误差、推理延迟、显存、单位 rollout 成本和不确定性校准。动作排序、控制成功率和 episode return 留到 Future 阶段。
 
 ### 5.4 闭环重锚定与 PhiZero 对比接口
 
-闭环不是另一个 token loss，而是 dynamics predictor 的推理方式。每轮只执行第一个动作或短动作 chunk，读取新的真实观测，再重新调用 encoder 和 dynamics：
+当前阶段的闭环只表示被动预测中的“重新观测和重锚定”，不执行动作。每轮预测一段未来物理 token，读取真实新观测，再重新调用 encoder 和 dynamics：
 
 ```python
 while not done:
     z_t = encoder.encode(observation)
-    candidates = planner.sample_actions(z_t, goal)
-    futures = dynamics.predict(z_t, candidates, horizon=H)
-    action = planner.select(futures, goal)
-    observation, reward, done = env.step(action)
+    futures = dynamics.predict(z_t, horizon=H)
+    observation = observation_stream.next()
 ```
 
-因此，“不生成未来像素”不等于“不使用视觉观测”。模型仍然在每个真实时间步读取当前观测，只是不用 diffusion decoder 合成尚未发生的画面。
+真正的动作条件闭环、候选动作规划和 MPC 后置到 Future 阶段。因此，“不生成未来像素”不等于“不使用视觉观测”。模型仍然在每个真实时间步读取当前观测，只是不用 diffusion decoder 合成尚未发生的画面。
 
 与 PhiZero 的统一对照接口为：
 
 ```text
-同一观测 o_t + 同一动作候选 a_{t:t+H}
+同一观测历史 o_{≤t}
     ├── PhiZero: physical-language rollout → video decoder（可选）
-    └── Ours:    physical-transition rollout
+    └── Ours:    passive physical-transition rollout
 ```
 
-控制和物理预测评价使用真实仿真状态、事件标签或统一的外部跟踪器。不能因为 PhiZero 生成了视频，就只用视频观感评价它；也不能因为本模型不生成视频，就用 token 交叉熵宣称它已经理解物理。两者都必须落到位置、速度、接触、碰撞、目标完成和控制回报上。
+阶段一的物理预测评价使用真实仿真状态、事件标签或统一的外部跟踪器。不能因为 PhiZero 生成了视频，就只用视频观感评价它；也不能因为本模型不生成视频，就用 token 交叉熵宣称它已经理解物理。两者都必须落到位置、速度、接触、碰撞和事件时间上。
 
 建议将以下曲线作为最小实验图：
 
 ```text
 horizon H → state/event error
-horizon H → closed-loop success
+horizon H → re-anchored prediction error
 rollout length → latency and GPU cost
 ```
 
-其中 `Ours-open-loop` 与 `Ours-closed-loop` 的差异用于证明重新观测和 MPC 重规划的贡献；`PhiZero full` 与 consequence-only 的差异用于展示未来像素渲染对控制准确性和系统成本的影响。
+其中 `Ours-passive-open-loop` 与 `Ours-passive-reanchored` 的差异用于证明重新观测对预测漂移的影响；`PhiZero passive/adapted` 与 consequence-only 的差异用于展示未来像素渲染对被动物理预测准确性和系统成本的影响。动作条件的控制成功率和 MPC 成本留到后续阶段。
 
 ## 6. 训练数据与标签策略
 
 首轮按成本从低到高：
 
-1. 仿真状态和动作作为近似真值，验证 dynamics 和 planner 接口；
+1. 仿真状态和被动视频作为近似真值，验证 dynamics 和物理事件接口；
 2. 小规模真实视频，通过冻结 encoder/tokenizer 生成转移标签；
-3. 扩大到动作丰富视频和机器人 demonstration；
+3. 后续再扩大到动作丰富视频和机器人 demonstration；
 4. 最后才考虑大规模 PhiZero 风格视频 tokenizer/reasoner 训练。
 
 标签分为三层：
@@ -199,7 +197,7 @@ rollout length → latency and GPU cost
 - consequence-only predictor（不渲染未来视频）；
 - oracle simulator state（仅作为上界，不作为公平 baseline）。
 
-关键消融：one-step、MCP、scheduled sampling、DAgger、closed-loop MPC、无 action condition、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外动作。
+阶段一关键消融：one-step passive、passive MCP、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
 
 ## 8. 可复现记录
 
