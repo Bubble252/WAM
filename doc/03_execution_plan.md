@@ -1,7 +1,7 @@
 # 执行计划与 Git 操作：从 PhiZero 代码审计到非像素世界模型验证
 
-**版本**：Research execution draft v0.1  
-**日期**：2026-09-26  
+**版本**：Research execution draft v0.2
+**日期**：2026-09-28
 **执行原则**：先文档、再代码审计、再最小可运行实验；每一步都有完成勾选、验收条件、commit 和 push 命令。没有远端时只做本地 commit，不声称已经 push。
 
 ## 1. Git 仓库与恢复规则
@@ -55,7 +55,7 @@ git push  # 只有已配置 origin 且用户希望同步时执行
 - [x] 生成项目背景与研究定位；
 - [x] 生成技术栈与张量/接口约定；
 - [x] 生成本执行计划，写明每步验收、commit 和 push；
-- [x] 明确首选 idea：physical-language-only + consequence-only；
+- [x] 明确首选 idea：physical-language-only + long-sequence global consistency；
 - [x] 记录 PhiZero 的限制：经验性符号、视觉不可观测状态、固定时长和算力成本；
 - [x] 已初始化独立本地 Git 并提交文档和审计清单；
 - [ ] 与用户确认真实远端、首轮环境和算力预算。
@@ -122,17 +122,19 @@ git push
 
 ## 6. P3：先预测状态，不生成像素
 
-- [ ] 实现 `dynamics.predict(observation, action, horizon)`；
+- [ ] 实现 `dynamics.predict(observation_history, horizon)`；
 - [ ] 建立 pixel/video、VAE latent、物理语言和 consequence-only 四个 baseline；
 - [ ] 训练短 horizon，再逐步增加 rollout 长度；
 - [ ] 记录 multi-step state error、事件 F1、uncertainty calibration、延迟和显存；
+- [ ] 对离散物理语言增加 local token、token block、persistent memory 和 global consistency 对照；
+- [ ] 用状态/事件 probe、局部 token block 干预、组合一致性和跨外观保持来评价物理可解释性；
 - [ ] 进行随机 token、时间错位 token、历史截断和遮挡输入的反事实测试；
 - [ ] 检查模型是否只预测外观变化而没有预测物理状态和事件；
-- [ ] 把失败样本按 perception、representation、dynamics、planning 分类。
+- [ ] 把失败样本按 perception、representation、dynamics、long-horizon composition 分类。
 
 ### P3 验收
 
-在同一数据和算力预算下，consequence-only 或 physical-language-only 至少能在一个未来状态、物理事件或长时域稳定性指标上达到 pixel baseline 的可比水平，同时显著降低 rollout 成本；若没有，保留负结果并停止无依据扩展。
+在同一数据和算力预算下，physical-language-only 至少能在一个未来状态、物理事件或长时域稳定性指标上达到 pixel/continuous-latent baseline 的可比水平，同时显著降低 rollout 成本；若没有，保留负结果并停止无依据扩展。
 
 ### P3 Git
 
@@ -199,7 +201,7 @@ git push
 至少报告两种结果：
 
 - **Matched-data**：PhiZero 和本方法使用相同数据、相同观测历史、相同划分、相同 horizon 和尽可能匹配的训练预算，用于比较方法本身；
-- **Official-pretrained**：直接使用 PhiZero 官方权重与本方法比较，明确标注这是完整系统能力比较，不能解释为严格架构公平比较。
+- **Official-pretrained**：直接使用 PhiZero 官方权重与本方法比较，明确标注这是完整系统能力比较，不能解释为严格架构公平比较。若将 PhiZero 用于纯被动预测，需要记录动作意图如何设置，不能把原生动作条件模型直接当作无条件 baseline。
 
 消融顺序固定为：
 
@@ -219,7 +221,7 @@ Ours passive MCP + observation re-anchoring
 
 ### Stage 0：数据与表示准备
 
-- [ ] 用仿真轨迹建立 `(observation, action, state, event, next_state)` manifest；
+- [ ] 用仿真轨迹建立 `(observation_history, state, event, next_state)` manifest；
 - [ ] 用 PISA/Kubric 视频建立外观变化与掉落运动的预训练/验证 split；
 - [ ] 训练或冻结 transition encoder，检查同一运动换首帧、同一首帧换运动的表示距离；
 - [ ] 离散 token 必须记录 codebook usage、perplexity、重复率和 scene/motion probe。
@@ -234,6 +236,16 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 
 连续 latent 或结构化状态可以把 `CE` 换成 masked regression/event loss。必须与 one-step baseline 对照，不能只展示训练 loss。
 
+### Stage 1b：物理语言长序列扩展
+
+- [ ] 将单个序列切成固定长度或事件对齐的 token blocks；
+- [ ] 增加 `persistent physical memory`，每个 block 结束时更新阶段、运动趋势、接触关系和不确定性摘要；
+- [ ] 增加 next-1/next-2/next-3 block 预测，作为离散 physical-language 版本的 MCP/MTP；
+- [ ] 增加 boundary consistency 和 transition composition loss；
+- [ ] 通过 token-to-observable bridge 计算轨迹连续性、事件顺序和接触持续性约束；
+- [ ] 只在仿真状态足够完整时加入条件化能量/动量残差；
+- [ ] 与“只增加序列长度”的 flat autoregressive baseline 对照，验证收益是否来自全局机制。
+
 ### Stage 2：处理 rollout 漂移
 
 - [ ] 先做 scheduled sampling：逐步提高历史预测 token 的比例；
@@ -243,7 +255,7 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 
 ### Stage 3：被动重新观测评估
 
-模型不执行动作，只在预测若干步后重新读取真实观测，再预测下一轮未来状态。报告开放环与重新观测版本的状态误差、事件 F1、长时域漂移和每段推理延迟。RAG 只作为无检索/有检索对照，不进入主模型定义。
+模型不执行动作，只在预测若干步后重新读取真实观测，再预测下一轮未来状态。报告开放环与重新观测版本的状态误差、事件 F1、长时域漂移、窗口边界跳变和每段推理延迟。RAG 只作为无检索/有检索对照，不进入主模型定义。
 
 ### Stage 4：物理残差和 token 稳定性
 
@@ -251,6 +263,8 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 - [ ] 仿真器有质量、速度、接触和外力时，再启用能量/动量残差；
 - [ ] 对摩擦、碰撞、动作做功和外力显式建模，不能默认“总能量恒定”；
 - [ ] token 重复惩罚只在固定 horizon 自回归解码出现重复时启用。
+
+阶段一关键消融：one-step passive、passive MCP、flat long AR、persistent memory、transition composition、observable physics、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
 
 动作条件的 DAgger、MPC 和控制回报评价保留到 Future 阶段，不作为当前训练配方的必需项。
 
@@ -274,7 +288,7 @@ PISA 很适合验证“模型是否理解掉落/碰撞/运动后果”，但不�
 
 PISA 的视频指标主要面向生成视频。若主模型不生成像素，必须把模型输出映射到 object trajectory、contact/event 或 mask-level 预测，再报告状态/事件/规划指标；不能用视频 FVD 代替非像素世界模型评价。
 
-## Future：动作条件反事实规划和控制（后置）
+## 7. Future：动作条件反事实规划和控制（后置）
 
 - [ ] 当前阶段不执行；
 - [ ] 对同一观测生成多个候选动作；
@@ -326,10 +340,10 @@ git push
 ## 10. P7：论文级汇总和停止条件
 
 - [ ] 阶段一 baseline 使用相同观测历史、horizon、数据 split 和算力记录；Future 阶段再统一动作条件；
-- [ ] 同时报 state prediction、counterfactual planning、closed-loop success、efficiency 和 calibration；
+- [ ] 阶段一同时报告 state/event prediction、长时域漂移、窗口边界一致性、efficiency 和 calibration；Future 阶段再报告 counterfactual planning 与 closed-loop success；
 - [ ] 至少保留一个失败案例集和一个负结果；
 - [ ] 对主 idea 做 novelty/related-work 检索，区分 PhiZero 的直接延伸与真正的新问题；
-- [ ] 若 consequence-only 在未来状态、物理事件或长时域稳定性指标上不优于 latent/pixel baseline，则停止扩展并改写研究问题；
+- [ ] 若 physical-language model 在未来状态、物理事件或长时域稳定性指标上不优于 continuous-latent/pixel baseline，则停止扩展并改写研究问题；
 - [ ] 生成最终 idea 选择报告和后续论文大纲。
 
 ### P7 Git

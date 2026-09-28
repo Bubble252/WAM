@@ -1,7 +1,7 @@
 # 技术栈与实现规格：物理语言、非显式动力学与可选渲染
 
-**版本**：Research design draft v0.1  
-**日期**：2026-09-26  
+**版本**：Research design draft v0.2
+**日期**：2026-09-28
 **原则**：先冻结接口与评价，再下载大仓库、模型和数据；所有状态表示都必须能被保存、重放、干预和比较。
 
 ## 1. 目录规划
@@ -85,7 +85,43 @@ z_emb:   [B, N, d]              # 给 reasoner/decoder 的 embedding
 
 首轮不要默认采用论文中的 33 帧、32 transition symbols 或 `(8,5,5,5,5,5)` FSQ 配置；这些是待审计配置，应根据显存和小数据实验缩放。
 
-### 4.2 连续非显式 latent
+### 4.2 长时序物理语言模型
+
+阶段一的核心不只是把 `N` 变大，而是让多个局部 transition token block 能够组合成一条稳定的长轨迹。推荐使用三层接口：
+
+```text
+局部层：z^local_{k,1:B}       # 第 k 个时间块内的 transition tokens
+记忆层：m_k                    # 跨块保存的 physical state summary
+全局层：y_{1:kB}               # 轨迹、事件和可观测物理量
+```
+
+递归更新可以抽象为：
+
+```python
+z_block = local_predict(context, memory, horizon=B)
+memory_next = memory_update(memory, z_block)
+observable = token_to_observable(z_block, memory_next)
+```
+
+`memory` 不能只是上一个 token 的 embedding；它应尽量编码阶段、运动趋势、接触关系、可见性和不确定性。`token_to_observable` 不要求恢复完整像素，可以只输出轨迹、速度方向、接触/碰撞状态和事件阶段，供全局一致性损失和评价使用。
+
+离散 token ID 本身没有可计算的物理距离，因此物理约束不应直接施加在整数 ID 上。建议通过三条路径建立约束：
+
+1. **边界一致性**：相邻 block 在位置、速度趋势、接触关系和事件阶段上连续；
+2. **转移组合一致性**：先预测 `A` 再预测 `B` 与直接预测组合块 `A⊕B` 的 observable 结果一致；
+3. **物理可观测量残差**：在有标注或仿真真值时，对轨迹连续性、事件顺序、接触持续性以及条件化的能量/动量残差进行约束。
+
+```text
+L = L_local
+  + λ_mtp L_multi_horizon
+  + λ_mem L_state_summary
+  + λ_comp L_transition_composition
+  + λ_phys L_observable_physics
+```
+
+其中 `L_multi_horizon` 对应 Next Forcing/MTP 的多步监督；`L_state_summary`、`L_transition_composition` 和 `L_observable_physics` 才是物理语言长序列方向的核心新增接口。
+
+### 4.3 连续非显式 latent
 
 使用 VAE/时空 encoder 或 JEPA-style predictor 获得 `s_t`，由 forward model 预测 `s_{t+1:t+H}`。训练目标可组合：
 
@@ -96,13 +132,15 @@ L = L_pred + λ_inv L_inverse + λ_contrast L_temporal
 
 连续 latent 不要求人类可解释，但必须通过 probe 和 intervention 检查是否包含位置、接触、速度方向和目标进展信息。
 
-### 4.3 结构化事件/关系图
+### 4.4 结构化事件/关系图
 
 节点可包含对象类别、位置、速度、可见性和置信度；边可包含接触、支撑、包含、相对距离和遮挡；事件可包含 `approach/grasp/lift/place/release/collision`。图 dynamics 预测边和节点的增量，并输出不确定性。
 
-此表示适合 C/D idea，因为动作候选可以只修改局部边或事件，再进行后果预测，不需要重建整段视频。
+此表示适合后续控制阶段，因为动作候选可以只修改局部边或事件，再进行后果预测，不需要重建整段视频。
 
 ## 5. 推理和训练接口
+
+阶段一只实现被动观测历史到未来物理语言的预测；`planner`、动作条件接口和控制评价保留给 Future 阶段，目录结构提前保留只是为了避免后续重构。
 
 ### 5.1 物理语言 tokenizer
 
@@ -117,22 +155,23 @@ recon = optional_renderer.decode(first_frame, z)
 
 ```python
 z_future, unc = dynamics.predict(
-    observation=obs_t,
-    action_candidates=a_t,
+    observation_history=obs_history,
     horizon=H,
-    goal=goal,
 )
 ```
 
 最小返回值包括未来状态表示、每步不确定性和模型版本。Future 阶段加入动作条件后，再要求 planner 在相同 `obs_t` 下比较多个动作候选；阶段一不展示动作采样。
 
-### 5.3 反事实评价
+### 5.3 物理后果评价
 
 ```python
-score = planner.evaluate_counterfactual(obs_t, action_a, goal)
+score = evaluator.evaluate_physical_consequences(
+    observation_history=obs_history,
+    prediction=z_future,
+)
 ```
 
-阶段一评价至少覆盖：multi-step state error、接触/终止事件 F1、事件时间误差、推理延迟、显存、单位 rollout 成本和不确定性校准。动作排序、控制成功率和 episode return 留到 Future 阶段。
+阶段一评价至少覆盖：multi-step state error、接触/终止事件 F1、事件时间误差、窗口边界跳变、推理延迟、显存、单位 rollout 成本和不确定性校准。动作排序、控制成功率和 episode return 留到 Future 阶段。
 
 ### 5.4 闭环重锚定与 PhiZero 对比接口
 
@@ -141,7 +180,7 @@ score = planner.evaluate_counterfactual(obs_t, action_a, goal)
 ```python
 while not done:
     z_t = encoder.encode(observation)
-    futures = dynamics.predict(z_t, horizon=H)
+    futures = dynamics.predict(observation_history, horizon=H)
     observation = observation_stream.next()
 ```
 

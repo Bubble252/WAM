@@ -1,7 +1,7 @@
 # WAM 终局：非显式像素世界模型与物理语言预测
 
-**版本**：Research design draft v0.1  
-**日期**：2026-09-26  
+**版本**：Research design draft v0.2
+**日期**：2026-09-28
 **参考论文**：[PhiZero: A World Model Built Around Physical Language](https://github.com/yaoyao-jpg/PhiZero)；本地 PDF：`/home/bubble/类脑计算/参考/WAM/PHIZERO.pdf`  
 **项目目标**：围绕 WAM（world/action model）探索“先预测世界状态转移，再按需渲染像素”的世界模型路线，并判断是否可以进一步做到不生成未来视频，只预测可用于理解、规划和控制的物理语言/结构化状态。
 
@@ -19,7 +19,7 @@ PhiZero 给出一个直接启发：把视频中的状态转移压缩成离散 ph
 4. **可干预性优先于重建分数**：好的世界模型应能回答“如果执行动作 A，目标物体的位置/接触/可达性会怎样”，而不是只在 PSNR、FVD 或视频偏好分数上表现好；
 5. **跨外观和跨 embodiment 泛化**：如果状态转移表示真的与外观解耦，它应能把同一运动模式迁移到不同场景、机器人或仿真域。
 
-## 2. 与 PhiZero 的关系和差异
+## 2. 与 PhiZero 和 Next Forcing 的关系
 
 PhiZero 的主线是：
 
@@ -29,25 +29,139 @@ PhiZero 的主线是：
 I0 + z_future ── diffusion decoder ──> 未来视频 V_future
 ```
 
-本项目保留 `z` 作为显式可检查的中间变量，但优先验证更省算力的变体：
+本项目当前阶段保留 `z` 作为显式可检查的中间变量，但不把未来视频渲染作为 rollout 的必要步骤：
 
 ```text
-观测 o_t + 动作 a_t ── dynamics/reasoner ──> 状态转移 z_{t:t+H}
-状态转移 z + 任务目标 ── planner/policy ──> a_{t:t+H}
-（可选）o_t + z ── renderer ──> 未来视频，仅用于可视化或审计
+观测历史 o_{≤t} ── dynamics/reasoner ──> 长时序物理语言 z_{t:t+H}
+z_{t:t+H} ── token-to-observable bridge ──> 轨迹、事件和可测物理量
+（可选）首帧 + z ── renderer ──> 未来视频，仅用于可视化或审计
 ```
+
+Next Forcing 则是在连续视频 latent 上进行 multi-chunk prediction：主模型预测当前 chunk，辅助模块同时预测多个未来 chunk。它提供“多步监督可以缓解局部目标短视”的重要基线，但连续 latent 的 MCP 不能直接解决离散 physical token 的词表组合、窗口边界和事件顺序问题。
+
+因此，当前工作的定位不是声称“连续 latent 一定优于离散 token”，而是研究两种表征在长时序上的不同瓶颈：
+
+| 表征 | 现有代表 | 长序列风险 | 本项目关注点 |
+|---|---|---|---|
+| 连续视频 latent | Next Forcing | 局部多 chunk 预测仍可能累积漂移 | 作为 continuous-latent baseline |
+| 离散 physical token | PhiZero | token block 的组合漂移、边界断裂、事件失序 | 设计全局一致的长序列预测 |
 
 PhiZero 当前仍是数据驱动的经验性状态转移表示，不是可解释的符号物理定律；论文也指出视觉不可观测的触觉、微观粒子和长时域转移仍是限制。WAM 的研究重点因此放在“非显式但可预测、可干预、可验证”的表示，而不是宣称已经获得真正的物理定律。
 
-## 3. 初步 idea 候选
+## 3. 物理语言长序列的真正缺口
+
+这里需要准确区分三个问题。
+
+**第一，PhiZero 已经有离散 token 序列预测，但主要以固定窗口为基本单位。**
+PhiZero 的 reasoner 会从当前首帧和条件出发，自回归预测一个长度为 `N` 的 physical-language token 序列；论文实现中，33 帧、9 个时间 latent 状态和每个相邻状态对的 32 个 transition symbols 组成长度为 256 的序列。它不是只预测一个 token，也不是完全没有长序列建模。当前的限制是：reasoner 的基本训练目标对应一个固定时长片段，超过这个窗口时主要采用 sliding-window rollout，把上一段的末帧作为下一段的条件。这样可以延长视频，但跨窗口的物理状态、事件阶段和误差累计缺少一个显式的持久记忆与全局约束。论文也把 hierarchical/recurrent prediction beyond fixed-duration clips 列为后续方向。
+
+**第二，Next Forcing 解决的是连续视频 latent 的多 chunk 监督。**
+它把当前 chunk 之外的 next-1、next-2、next-3 chunk 一起作为训练目标，缓解模型只看近邻时间步的 myopic supervision。这个思想可以借鉴到物理语言，但直接把 MTP/MCP 搬到离散 token 上只解决“看得更远”，不自动解决物理语言特有的组合漂移：token 表示的是局部状态转移，前一步的小误差会改变后一步的条件，离散错误经过长序列组合后可能变成不连续、重复或物理事件顺序错误。
+
+**第三，物理语言不是完整状态，不能只依赖局部 token Markov 链。**
+单个 transition token 往往只表示“发生了什么变化”，不一定包含足够的绝对位置、速度、接触阶段和历史上下文。长时序预测需要一个跨片段保留的 physical state summary，以及一个检查不同局部转移能否组成同一条全局轨迹的约束。
+
+因此，项目的核心问题应改写为：
+
+> **如何在离散物理语言空间中，从局部 transition token 预测扩展到具有持久状态、跨片段组合和全局物理一致性的长时序预测，而不依赖未来像素生成？**
+
+## 4. 分层次的 novelty
+
+### 4.1 弱主张：把 Next Forcing 搬到物理 token
+
+在未来多个 horizon 同时预测 physical token，能够提供多步监督，是必要的训练基线，但单独不足以构成主要创新。它只能说明模型被要求预测更远的 token，不能说明这些 token 在长时间组合后仍然保持物理一致。
+
+### 4.2 中等主张：离散物理语言比连续 latent 更容易检查
+
+与 Next Forcing 的连续视频 latent 相比，离散 physical token 可以做 token-level 统计、转移聚类、事件 probe、序列编辑和跨外观迁移，因此具有更直接的可检查性。但应写成“更容易归因和审计”，不能未经实验直接声称离散表示具有更高的内在物理可解释性。
+
+这里的“物理可解释性”必须由实验定义，而不是由 token 的离散形式定义。至少需要验证：
+
+- **状态 probe**：token 或 memory 是否包含位置、速度方向、接触状态和事件阶段；
+- **事件 probe**：能否区分接近、碰撞、反弹、停止、遮挡等事件及其时间顺序；
+- **局部干预**：替换一个 token block 后，变化是否主要局限在对应的物理事件；
+- **组合一致性**：`A` 后接 `B` 与直接观察到的 `A⊕B` 是否得到一致的可观测后果；
+- **跨外观保持**：改变首帧外观和背景后，相同运动是否保留相似的 transition representation。
+
+只有当这些 probe 和干预指标改善时，才能声称模型比连续 latent 更容易进行物理归因；token 数量更少或更离散本身不是证据。
+
+### 4.3 强主张：全局一致的层级物理语言长序列模型
+
+首选方法可以暂命名为 **Hierarchical Global-Consistent Physical Language Model（HG-PLM，层级全局一致物理语言模型）**。它包含三个相互配合的部分：
+
+1. **局部转移预测**：在 token 或 token block 层面预测下一段 physical language；
+2. **持久物理记忆**：每个局部转移块更新一个跨窗口的 physical state summary，记录阶段、速度趋势、接触关系和不确定性；
+3. **跨片段全局约束**：要求相邻 token block 在边界状态、事件顺序、轨迹连续性和可观测物理量上能够组合成同一条长轨迹。
+
+训练目标可以写成：
+
+```text
+L = L_local
+  + λ_mtp L_multi_horizon
+  + λ_mem L_state_summary
+  + λ_comp L_transition_composition
+  + λ_phys L_observable_physics
+```
+
+其中 `L_local` 是普通的 token 交叉熵，`L_multi_horizon` 是 Next Forcing/MTP 风格的多 horizon 预测；真正的新增部分是 `L_state_summary`、`L_transition_composition` 和 `L_observable_physics`。
+
+物理约束不能直接对离散 token ID 做“能量守恒”。应通过一个 token-to-observable bridge，把 token 分布或 token block 映射到可测的轨迹、速度方向、接触状态、事件阶段等量，再施加可微的连续性和事件约束。只有在仿真器提供质量、速度、接触和外力时，才额外加入条件化的能量/动量残差。
+
+### 4.4 一句话主张
+
+建议论文主张写成：
+
+> **现有物理语言模型主要以固定时长窗口内的局部 token 自回归为基本预测单位；我们引入持久物理记忆、多 horizon token 监督和跨片段物理一致性，使离散 physical language 能在不生成未来像素的情况下稳定预测更长时间的状态转移。**
+
+更简短的中文版本是：
+
+> **我们不是简单预测更多物理 token，而是让多个局部转移 token 能够组成一条全局一致的物理演化轨迹。**
+
+## 5. 这个故事解决什么问题
+
+它针对的是三个具体失败模式：
+
+| 失败模式 | 现有方法的表现 | HG-PLM 的对应机制 |
+|---|---|---|
+| 近邻正确、长时域漂移 | 局部 CE 或单窗口预测缺少远期约束 | multi-horizon supervision + scheduled sampling |
+| 滑动窗口边界不连续 | 下一窗口只依赖上一段末帧，阶段和速度可能跳变 | persistent physical memory + boundary consistency |
+| token 序列物理事件失序 | 离散错误在递归组合后被放大 | transition composition + event/observable constraints |
+
+因此“更长”不能只定义成输出 token 数更多，而应定义成：在固定算力、固定 token 预算或固定窗口扩展次数下，模型保持更低的长时域状态误差、更少的事件顺序错误和更小的窗口边界断裂。
+
+### 5.1 建议的最小对照
+
+```text
+PhiZero fixed-window
+PhiZero sliding-window
+Continuous-latent Next Forcing
+Discrete physical-language local AR
+Discrete physical-language + MCP
+HG-PLM: MCP + persistent memory + global consistency
+```
+
+主结果应比较：
+
+- 长时域状态/轨迹误差；
+- 接触、碰撞、掉落、停止等事件 F1 和事件时间误差；
+- 窗口边界的状态跳变；
+- token 的 codebook 使用率、重复率和语义 probe；
+- 同一物理过程在不同外观下的 token 一致性；
+- 预测延迟、显存和单位时间覆盖的物理时间。
+
+这样论文的比较逻辑就不是“我们的序列比 PhiZero 长”，而是：
+
+> **PhiZero 提供了离散物理语言和固定窗口的 reason-then-render 基线；Next Forcing 提供了连续 latent 的多步监督基线；我们研究的是如何把多步监督、持久物理记忆和全局一致性结合起来，解决离散物理语言长序列递归中的组合漂移。**
+
+## 6. 初步 idea 候选
 
 ### Idea A：Physical-language-only world model（首选）
 
-训练 tokenizer 将相邻 latent state 的变化编码成离散 token 或短序列；训练 dynamics model 只预测未来物理语言，不解码视频。下游用状态预测误差、动作可达性、接触事件和规划成功率评价。视频 decoder 只保留为离线诊断器。
+训练 tokenizer 将相邻 latent state 的变化编码成离散 token 或短序列；训练 dynamics model 只预测未来物理语言，不解码视频。下游用状态预测误差、接触事件、事件顺序和长时域稳定性评价。视频 decoder 只保留为离线诊断器。
 
-**核心假设**：对于控制和规划，预测“物体/关系/运动如何变化”比生成每一帧的纹理更重要。  
-**最小验证**：在小型机器人操作或 2D/3D 物理环境中，与像素预测、VAE latent 预测、object-state 预测比较相同算力下的 multi-step state error 与 success rate。  
-**主要风险**：物理语言可能只记住动作类别，丢失绝对位置、遮挡下的状态和细粒度接触信息。
+**核心假设**：对于被动物理预测，预测“物体/关系/运动如何变化”比生成每一帧的纹理更重要。
+**最小验证**：在 PISA/Kubric 或小型 2D/3D 物理环境中，与像素预测、连续 latent 预测、object-state 预测比较相同算力下的 multi-step state error、事件 F1 和长时域漂移。
+**主要风险**：物理语言可能只记住外观变化，丢失绝对位置、遮挡下的状态和细粒度接触信息。
 
 ### Idea B：Non-explicit world model with task-sufficient latent（任务充分而非物理显式）
 
@@ -65,10 +179,10 @@ PhiZero 当前仍是数据驱动的经验性状态转移表示，不是可解释
 
 ### Idea D：不渲染像素的反事实动作世界模型
 
-给定观测、动作候选和目标，模型直接预测一组结构化后果：目标位移、接触是否成立、抓取是否稳定、碰撞风险、终止条件和不确定性。训练时用视频 tokenizer 或仿真状态产生弱标签；推理时只在候选动作之间排序。
+给定观测历史，模型直接预测一组结构化未来后果：目标轨迹、接触是否成立、碰撞/停止事件、事件时间和不确定性。训练时用视频 tokenizer 或仿真状态产生弱标签；动作候选和规划接口保留到后续控制阶段。
 
-**核心假设**：动作选择只需要可比较的未来后果，不需要完整未来视频。  
-**最小验证**：固定相同 policy backbone，比较 pixel rollout、latent rollout 和 consequence-only rollout 的规划成功率、延迟和显存。
+**核心假设**：长时序物理预测只需要足以描述未来状态和事件的 consequence representation，不需要完整未来视频。
+**最小验证**：比较 pixel rollout、连续 latent rollout、离散 physical-language rollout 和 consequence-only rollout 的状态误差、事件准确率、延迟和显存。
 
 ### Idea E：世界模型的“渲染审计器”而非“渲染核心”
 
@@ -77,58 +191,58 @@ PhiZero 当前仍是数据驱动的经验性状态转移表示，不是可解释
 **核心假设**：渲染应服务于审计和数据闭环，而不是定义世界模型能力。  
 **主要风险**：审计器与状态模型共享错误表征时，可能产生“看起来合理”的错误视频。
 
-## 4. 当前推荐的主线
+## 7. 当前推荐的主线
 
-首轮采用 **A + D**：先学习一个小规模、可导出的物理语言/状态转移表示；再训练只预测结构化后果的 dynamics model，并把 PhiZero 风格 renderer 降为可选审计模块。B 作为连续 latent 强 baseline，C 作为结构化表示扩展，E 作为工程化可视化策略。
+首轮采用 **A + 长时序物理语言扩展**：先学习一个小规模、可导出的离散 physical-language 表示；再训练局部 token predictor、multi-horizon MCP、persistent physical memory 和 transition composition/global consistency。PhiZero 风格 renderer 降为可选审计模块，B 作为连续 latent 强 baseline，C 作为结构化事件表示扩展，E 作为工程化可视化策略。动作条件控制暂不纳入阶段一。
 
-第一阶段不追求复现论文的 128 张 A100 训练规模，也不把大规模视频数据下载作为启动条件。先用公开的小数据或仿真环境验证“去掉像素生成后，预测和控制是否仍然成立”。
+第一阶段不追求复现论文的 128 张 A100 训练规模，也不把大规模视频数据下载作为启动条件。先用公开的小数据或仿真环境验证“离散物理语言能否在不生成未来像素的情况下稳定预测更长的被动物理序列”。
 
-### 4.1 进一步收敛后的论文主张
+### 7.1 进一步收敛后的论文主张
 
-建议暂用一个能概括整条链路的名称：**Closed-Loop Physical Transition Model（CPTM，闭环物理转移模型）**。论文主方法只回答一个问题：在不生成未来像素的情况下，动作条件的转移 token 是否足以支持多步预测和闭环决策？
+建议暂用一个能概括当前问题的名称：**Hierarchical Global-Consistent Physical Language Model（HG-PLM，层级全局一致物理语言模型）**。论文主方法只回答一个问题：在不生成未来像素的情况下，离散 physical language 能否通过持久物理记忆和跨片段一致性稳定预测更长的状态转移序列？
 
-为了避免把 MCP、scheduled sampling、DAgger、RAG、MPC、熵正则和物理损失写成七个并列贡献，建议把主张收敛成一句话：
+为了避免把 MCP、scheduled sampling、RAG、熵正则和物理损失写成多个并列贡献，建议把主张收敛成一句话：
 
-> **给定当前观测和动作候选，模型在物理转移 token 空间预测未来状态后果；训练用多步转移监督和仿真器纠偏减少 rollout 漂移，推理只在闭环观测处重新锚定，不需要逐步生成未来像素。**
+> **现有物理语言模型主要在固定窗口内进行局部 token 自回归；我们引入 multi-horizon token 监督、持久物理记忆和跨片段全局一致性，使离散 physical language 在不生成未来像素的情况下稳定预测更长的被动物理演化。**
 
 其中只有三件事构成主线：
 
-1. **表示**：外观与状态变化分离的 transition token/latent；
-2. **预测**：动作条件的多步未来转移预测，并直接支持反事实动作排序；
-3. **闭环**：执行一步、重新观察、重新预测的 MPC 式验证协议。
+1. **离散表征**：外观与状态变化分离的 transition token；
+2. **长序列预测**：局部 token 预测加 multi-horizon block supervision；
+3. **全局稳定机制**：persistent memory、boundary consistency 和 transition composition。
 
-MCP（需要在论文中明确定义为“多步转移一致性监督”）是训练目标；DAgger 是在有仿真器真值时用于纠偏的数据收集机制；闭环重锚定是推理与评估协议。三者共同支撑主张，但不要把它们包装成三个独立创新。
+MCP 是训练目标；persistent memory 和 global consistency 才是长序列方法的核心；scheduled sampling 和历史 token 加噪是训练稳定性消融；未来的 DAgger、MPC 和控制回报评价单独作为后续阶段。
 
-### 4.2 核心、支撑项和 tricks
+### 7.2 核心、支撑项和 tricks
 
 | 组件 | 定位 | 首轮处理 |
 |---|---|---|
-| transition physical token/latent | 核心表示 | 必做；与 pixel/VAE/object-state baseline 对照 |
-| 动作条件多步预测（MCP） | 核心训练目标 | 必做；报告 1/4/8/16 步误差和反事实排序 |
-| 闭环重新锚定（MPC） | 核心验证协议 | 必做；每执行一步用真实观测更新状态 |
-| DAgger 式仿真器纠偏 | 关键支撑机制 | 只有 MuJoCo/ManiSkill 等有状态真值时启用 |
-| Scheduled sampling | 训练替代/消融 | 与 DAgger 分开比较，首轮不要同时堆叠 |
+| 离散 transition physical token | 核心表示 | 必做；与连续 latent、pixel 和 object-state baseline 对照 |
+| Multi-horizon token prediction（MCP/MTP） | 核心训练目标 | 必做；报告不同 horizon 的状态和事件误差 |
+| Persistent physical memory | 核心长序列机制 | 必做；记录跨 block 状态、阶段和不确定性 |
+| Boundary/composition/global consistency | 核心长序列机制 | 必做；验证窗口拼接和递归组合 |
+| Scheduled sampling | 训练稳定性消融 | 与 flat autoregressive baseline 分开比较 |
 | 历史 token 加噪 | 鲁棒性 regularizer | 后加；只在历史误差敏感实验中启用 |
 | 熵正则/码本利用率约束 | 防离散 token 坍缩 | 仅用于离散 tokenizer，并报告 perplexity/usage |
 | RAG 相似轨迹检索 | 外部记忆增强 | 作为 baseline/消融，不能算主创新 |
 | token 重复惩罚 | 解码技巧 | 只有出现重复退化时才加 |
 | 能量/动量损失 | 域特定物理先验 | 只在有质量、速度、接触和外力定义的仿真数据上启用 |
 
-首轮实验只保留一条清晰增量链：`one-step → MCP → MCP+scheduled sampling`，然后在独立实验中替换为 `MCP+DAgger`。RAG、历史噪声、熵正则和物理残差都不能进入首版主结果。
+首轮实验只保留一条清晰增量链：`one-step local AR → MCP/MTP → MCP + persistent memory → MCP + memory + global consistency`。scheduled sampling、历史噪声、RAG、熵正则和物理残差作为单独消融，不能与主方法同时无控制地堆叠。
 
-### 4.3 物理损失的边界
+### 7.3 物理损失的边界
 
 通用真实视频不能直接使用能量/动量守恒损失。物体质量、三维速度、相机标定、接触冲量和外力通常不可观测；有摩擦、碰撞、驱动器或线缆时，系统本来也不是封闭守恒系统。推荐将其改成**带条件的物理残差**：只在仿真器提供 `qpos/qvel/contact/force` 的片段上计算，并把动作做功、摩擦耗散和外力项纳入残差。真实视频阶段使用轨迹、接触和事件指标，不强行套守恒公式。
 
-## 5. 必须保持诚实的边界
+## 8. 必须保持诚实的边界
 
 - `physical language` 在 PhiZero 中是学习到的离散状态转移符号，不等于可读的自然语言，也不等于已知物理方程；
 - 不把重建质量、视频观感或 token 可视化直接当成世界模型正确性的证据；
-- 必须报告遮挡、接触、长时域、分布外动作和反事实动作的失败案例；
+- 必须报告遮挡、接触、长时域、窗口边界、分布外外观和事件组合的失败案例；
 - 如果代码仓库或权重未公开，项目只能做论文结构分析和小规模概念验证，不能声称完成 PhiZero 数值复现；
 - 所有候选 idea 都需要通过与 pixel/latent/object-state baseline 的等算力对照和反事实测试。
 
-## 6. 待确认事项
+## 9. 待确认事项
 
 相关路线的调查记录见 [`references/manifests/literature_scan.md`](../references/manifests/literature_scan.md)，其中区分了 latent video prediction、latent-action world model、事件/物理推理、视频 tokenizer 和 PhiZero physical language。
 
