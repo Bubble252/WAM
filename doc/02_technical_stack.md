@@ -1,7 +1,7 @@
 # 技术栈与实现规格：物理语言、非显式动力学与可选渲染
 
-**版本**：Research design draft v0.2
-**日期**：2026-09-28
+**版本**：Research design draft v0.3
+**日期**：2026-09-29
 **原则**：先冻结接口与评价，再下载大仓库、模型和数据；所有状态表示都必须能被保存、重放、干预和比较。
 
 ## 1. 目录规划
@@ -142,6 +142,104 @@ L = L_pred + λ_inv L_inverse + λ_contrast L_temporal
 
 阶段一只实现被动观测历史到未来物理语言的预测；`planner`、动作条件接口和控制评价保留给 Future 阶段，目录结构提前保留只是为了避免后续重构。
 
+### 5.0 Reasoner 改造接口
+
+首轮冻结 PhiZero tokenizer、FSQ、diffusion decoder 和 Wan/VAE 基座，只改 Reasoner 与新增小模块。基础输入仍是首帧或观测历史、caption/prompt 和 physical-language token target。
+
+```text
+Frozen tokenizer/decoder
+        │
+        ▼
+Reasoner
+  ├── main AR branch: next-token CE
+  ├── discrete MCP heads: next-1/next-2/next-3 block CE
+  ├── physics projection head: token/hidden → observable state
+  └── optional memory: previous chunk hidden state
+```
+
+离散版 MCP 不直接复制连续 flow-matching 的噪声设定，而是用 token-level corruption 作为高噪声 analogue：
+
+```text
+corruption_rate ∈ {0.0, 0.3, 0.5, 0.7}
+fusion_layers = {1/4, 1/2, 3/4, final}
+mcp_depths = {next-1, next-2, next-3}
+loss_weights = {0.5, 0.2, 0.1}
+```
+
+这些值是首轮搜索空间，不是固定结论。必须与 flat long AR、no-corruption、final-layer-only 和 random-init head 对照。
+
+MCP 的“多 chunk 并行”首先指训练时同时提供多个未来 block 的监督，不代表推理时自动得到同样的加速。阶段一必须分别报告：
+
+1. **training-only MCP**：MCP head 只提供梯度，推理时丢弃；
+2. **parallel proposal**：MCP head 一次提出多个未来 block，再用主 AR 分支验证或接受；
+3. **普通递归 AR**：逐 token 或逐 block 生成，作为速度和准确性的基线。
+
+如果没有 block verification 或 speculative decoding，不能把 MCP 写成推理加速方法。
+
+### 5.0.1 投影头与物理残差
+
+投影头先作为一次性 probe，再决定是否进入训练回路。
+
+| 版本 | 输入 | 网络 | 使用条件 |
+|---|---|---|---|
+| A | 单 token embedding | `Linear(512,128) -> GELU -> Linear(128,4)` | `(q,p)` 线性或浅层非线性可读，`R² > 0.7` |
+| B | 整段 token embedding | 1D causal conv 或 2 层 tiny transformer | token 更像 delta，需要时间积分，`0.4 <= R² <= 0.7` |
+| fallback | Reasoner hidden state | 同 A/B | token embedding 不够但 hidden state 可读 |
+
+这里的 `512` 只是待审计占位符，必须从实际 tokenizer/Reasoner checkpoint 读取 embedding dimension；不能把 PhiZero 的词表 token embedding、FSQ transition embedding 和 Qwen Reasoner hidden state 当成同一空间。
+
+`R²` 阈值是工程决策规则，不是可迁移的理论界限。probe 报告必须同时包含常数/线性 baseline、验证集和跨数据集测试，并按对象级状态归一化，避免尺度大的坐标变量掩盖速度和接触变量失败。
+
+投影目标优先写成统一的可观测状态：
+
+```text
+state = (x, y, vx, vy[, z, vz, contact, event_phase])
+```
+
+这里的 `state` 是对象级变量，不是整个场景的无歧义全局变量。多物体视频必须先固定一种对齐协议：
+
+- 单主对象：只选择数据集定义的被作用对象或运动主体；
+- 固定对象槽位：按 simulator object id 对齐，适合 Phyco/TDW/Physion 等有对象标识的数据；
+- 集合预测：使用 permutation-invariant set loss，适合对象数变化的场景。
+
+不能把多个物体的 token embedding 直接平均后回归一个 `(x,y,vx,vy)`，否则投影头可能只学到场景/相机偏差。
+
+物理 loss 不默认严格守恒。推荐写成：
+
+```text
+L_phys = L_track
+       + λ_boundary L_boundary
+       + λ_event L_event_order
+       + λ_residual L_conditional_physics
+```
+
+其中 `L_conditional_physics` 只在仿真数据提供质量、速度、接触、外力或可判断低耗散场景时启用。对于掉落、摩擦、非弹性碰撞和主动外力场景，应使用“能量变化是否与事件类型一致”或“边界状态是否连续”，而不是强行令 `E_t = E_0`。
+
+### 5.0.2 三种长 rollout 模式
+
+| 模式 | 过程 | 作用 |
+|---|---|---|
+| token-only | Reasoner 直接递归生成下一段 token | 最低成本主对照 |
+| hidden-state carry | 每个 chunk 传递上一段 Reasoner hidden state | 检验 Transformer-XL 式记忆是否减少漂移 |
+| render-reencode | token 解码成视频，再用 frozen tokenizer 重编码 | 最强重锚定，但成本最高，需单独报告 |
+
+render-reencode 不能默认算免费闭环。它会重新依赖 decoder 的视觉质量，也可能把 decoder 错误注入下一轮 token。因此它更适合作为“长程稳定上界/诊断模式”，而不是首轮唯一推理路径。
+
+### 5.0.3 Token block 与时间对齐
+
+PhiZero 的 released path 固定输入 33 帧、8 FPS 视频，并输出 256 个 physical-language symbols。论文方法将其解释为 9 个时间 latent 状态之间的 8 个 transition，每个 transition 使用 32 个 symbols。因此首轮应把一个 32-token group 作为最小 transition block；它不应被误称为一个物理时间步。
+
+实际 block 时长必须由 tokenizer 的 temporal stride 和导出张量确认。不能直接把 256 token 均匀除成 0.25 秒 chunk，也不能默认单 token 具有独立的 `(x,y,vx,vy)` 语义。所有 MCP horizon、投影头标签和 16--32 秒外推曲线都要在 manifest 中记录：
+
+```text
+video_fps
+num_frames
+token_count
+tokens_per_transition_block
+num_transition_blocks
+effective_block_duration
+```
+
 ### 5.1 物理语言 tokenizer
 
 ```python
@@ -204,7 +302,7 @@ horizon H → re-anchored prediction error
 rollout length → latency and GPU cost
 ```
 
-其中 `Ours-passive-open-loop` 与 `Ours-passive-reanchored` 的差异用于证明重新观测对预测漂移的影响；`PhiZero passive/adapted` 与 consequence-only 的差异用于展示未来像素渲染对被动物理预测准确性和系统成本的影响。动作条件的控制成功率和 MPC 成本留到后续阶段。
+其中 `Ours-passive-open-loop` 与 `Ours-passive-reanchored` 的差异用于证明重新观测对预测漂移的影响；`PhiZero passive/adapted` 与 physical-language-only 长 rollout 的差异用于展示未来像素渲染对被动物理预测准确性和系统成本的影响。动作条件的控制成功率和 MPC 成本留到后续阶段。
 
 ## 6. 训练数据与标签策略
 
@@ -236,7 +334,7 @@ rollout length → latency and GPU cost
 - consequence-only predictor（不渲染未来视频）；
 - oracle simulator state（仅作为上界，不作为公平 baseline）。
 
-阶段一关键消融：one-step passive、passive MCP、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
+阶段一关键消融：one-step passive、flat long AR、passive MCP、MCP + projection head、MCP + conditional physics residual、hidden-state carry、render-reencode、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
 
 ## 8. 可复现记录
 

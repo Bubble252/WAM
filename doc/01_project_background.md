@@ -1,7 +1,7 @@
 # WAM 终局：非显式像素世界模型与物理语言预测
 
-**版本**：Research design draft v0.2
-**日期**：2026-09-28
+**版本**：Research design draft v0.3
+**日期**：2026-09-29
 **参考论文**：[PhiZero: A World Model Built Around Physical Language](https://github.com/yaoyao-jpg/PhiZero)；本地 PDF：`/home/bubble/类脑计算/参考/WAM/PHIZERO.pdf`  
 **项目目标**：围绕 WAM（world/action model）探索“先预测世界状态转移，再按需渲染像素”的世界模型路线，并判断是否可以进一步做到不生成未来视频，只预测可用于理解、规划和控制的物理语言/结构化状态。
 
@@ -213,6 +213,54 @@ HG-PLM: MCP + persistent memory + global consistency
 
 MCP 是训练目标；persistent memory 和 global consistency 才是长序列方法的核心；scheduled sampling 和历史 token 加噪是训练稳定性消融；未来的 DAgger、MPC 和控制回报评价单独作为后续阶段。
 
+### 7.1.1 更新后的可执行版本
+
+当前更稳妥的论文定位是：
+
+> **在冻结 PhiZero tokenizer/decoder 并保留离散 physical-language token 作为主推理接口的前提下，改造 Reasoner，使其从 4 秒固定窗口扩展到 16--32 秒长时序 rollout，并通过可观测物理状态约束减少跨窗口漂移。**
+
+这个表述比“PhiZero 是单步模型”更准确。PhiZero 的 Reasoner 不是只输出一个 token，而是在 4 秒窗口内用 next-token 自回归目标生成 256 个离散 physical-language token。真正的问题是：这个目标主要监督固定窗口内的局部 token 序列，长时序只能通过 sliding-window 递归外推，跨窗口的物理状态、事件阶段和误差累积没有显式约束。
+
+首轮创新收敛为三件事：
+
+1. **离散版 MCP/MTP**：把 Next Forcing 的 multi-chunk 监督改写到 FSQ physical-language token 上，对 next-1/next-2/next-3 token block 同时加交叉熵监督，缓解局部 next-token 目标的短视。
+2. **物理状态投影头**：先用 frozen tokenizer 的 token embedding 诊断 `(q, p)` 是否可读，再把投影头接入 Reasoner 训练，对长 rollout 的可观测轨迹施加物理残差。
+3. **推理再锚定**：将 render → re-encode 作为长 rollout 的闭环重锚定方案之一，同时保留 token-only rollout 作为低成本对照。
+
+因此，“离散 token + 长程 + 显式物理约束”可以作为方法组合的主线，但“第一个”必须先作为待检索假设写进 related-work 任务，不能在立项文档中直接断言。
+
+### 7.1.2 哪些前提还没有完全确认
+
+以下事项需要在实验前确认，否则会影响方法是否成立：
+
+| 待确认点 | 为什么关键 | 建议验证 |
+|---|---|---|
+| token embedding 是否含有绝对状态 | 投影头要预测 `(x,y,vx,vy)`；若 token 只表示 delta，单 token MLP 会失败 | Linear/MLP probe，报告 `R²` 和事件 probe |
+| 仿真数据是否提供统一坐标和速度 | Phyco、TDW、Physion、CLEVRER 的状态字段和相机坐标未必一致 | 先做数据 schema audit，不直接承诺可合并 |
+| 能量/动量是否应严格守恒 | 掉落、摩擦、碰撞、外力和非弹性接触会改变机械能 | 将 `L_cons` 写成条件化物理残差，只在满足条件的片段启用严格守恒 |
+| render → re-encode 是否值得 | 它会重新引入 decoder 成本和渲染误差，也可能改变 token 分布 | 必须和 token-only rollout、hidden-state carry rollout 对照 |
+| PhiZero 原训练集是否可获得 | 公开代码不重发 5M reasoner 训练集；重新训练可能只能用自备 JSONL | 先记录可下载数据、许可证和存储预算 |
+| PhiZero passive baseline 如何设 prompt | 原 Reasoner 输入包含 caption/action intent；纯被动预测需要固定 prompt 规则 | 在 matched-data 里固定 caption 生成策略或使用 GT caption |
+| 16--32 秒是否能公平评价 | PhiZero 原生窗口是 4 秒；长序列需要滑窗、重渲染或重编码 | 报告 4s、8s、16s、32s 分段指标和计算成本 |
+
+### 7.1.3 推荐保留与暂缓的模块
+
+首轮主方法保留：
+
+- PhiZero tokenizer/decoder 冻结；
+- Reasoner 上增加离散版 MCP heads；
+- probe 决定投影头方案 A/B；
+- 条件化物理残差；
+- token-only、hidden-state carry、render-reencode 三种 rollout 对照；
+- 4s 到 32s 的长度课程和外推评测。
+
+暂缓进入主方法：
+
+- DPO 偏好优化：作为二阶段失败兜底，不能与 MCP 和物理残差同时首次启用；
+- Q-Former LoRA：只有 probe 失败且 Reasoner hidden state 也不可读时再启用；
+- 严格能量守恒：只作为可满足条件的仿真子集指标，不能当成所有物理场景的统一 loss；
+- “第一个” novelty：等 related work 和 scoop check 后再决定措辞。
+
 ### 7.2 核心、支撑项和 tricks
 
 | 组件 | 定位 | 首轮处理 |
@@ -230,9 +278,29 @@ MCP 是训练目标；persistent memory 和 global consistency 才是长序列�
 
 首轮实验只保留一条清晰增量链：`one-step local AR → MCP/MTP → MCP + persistent memory → MCP + memory + global consistency`。scheduled sampling、历史噪声、RAG、熵正则和物理残差作为单独消融，不能与主方法同时无控制地堆叠。
 
+### 7.2.1 可选增强的边界
+
+| 借鉴方法 | 可能接入位置 | 当前定位 |
+|---|---|---|
+| EAGLE 式 hidden-state prediction | MCP head 同时预测未来 hidden state | 只做 hidden-space baseline，不能替代 token CE |
+| Transformer-XL 式 memory | chunk 之间传递 detached hidden state | 与 token-only 对照，观察是否减少边界跳变 |
+| 长度课程 | 4s → 8s → 16s → 32s | 训练策略，不能单独算 novelty |
+| DPO/偏好优化 | 仿真器生成守恒/漂移 rollout pair | 二阶段兜底，需要可靠的偏好构造和 KL 控制 |
+| Q-Former LoRA | tokenizer 物理信息不足时 | 只有 probe 与 Reasoner hidden state 都失败才启用 |
+
 ### 7.3 物理损失的边界
 
 通用真实视频不能直接使用能量/动量守恒损失。物体质量、三维速度、相机标定、接触冲量和外力通常不可观测；有摩擦、碰撞、驱动器或线缆时，系统本来也不是封闭守恒系统。推荐将其改成**带条件的物理残差**：只在仿真器提供 `qpos/qvel/contact/force` 的片段上计算，并把动作做功、摩擦耗散和外力项纳入残差。真实视频阶段使用轨迹、接触和事件指标，不强行套守恒公式。
+
+在理想的低耗散、无外力片段上，可以检查：
+
+```text
+E_mech(t) = Σ_i 0.5 m_i ||v_i(t)||² + m_i g y_i(t) + U_contact(t)
+r_E(t) = E_mech(t+1) - E_mech(t) - W_external(t) + D_friction(t)
+r_p(t) = p(t+1) - p(t) - J_external(t)
+```
+
+只有在 `W_external`、`D_friction` 或 `J_external` 可估计时，残差才有物理含义。否则使用轨迹边界连续性、事件顺序和动量方向等弱约束。
 
 ## 8. 必须保持诚实的边界
 

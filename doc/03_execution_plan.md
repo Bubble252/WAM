@@ -1,7 +1,7 @@
 # 执行计划与 Git 操作：从 PhiZero 代码审计到非像素世界模型验证
 
-**版本**：Research execution draft v0.2
-**日期**：2026-09-28
+**版本**：Research execution draft v0.3
+**日期**：2026-09-29
 **执行原则**：先文档、再代码审计、再最小可运行实验；每一步都有完成勾选、验收条件、commit 和 push 命令。没有远端时只做本地 commit，不声称已经 push。
 
 ## 1. Git 仓库与恢复规则
@@ -44,7 +44,7 @@ git push  # 只有已配置 origin 且用户希望同步时执行
 | P1 | PhiZero 代码和论文接口审计 | repo 状态、依赖、入口、许可证报告 | [ ] |
 | P2 | 最小 tokenizer/表示 smoke test | token 统计、重建/预测 sanity check | [ ] |
 | P3 | 不渲染像素的 dynamics baseline | latent/物理语言 multi-step 预测 | [ ] |
-| P4 | 被动物理预测评价 | multi-step error、event F1、长时域稳定性 | [ ] |
+| P4 | HG-PLM 长程 Reasoner | 离散 MCP、投影头、物理残差、长 rollout | [ ] |
 | P5 | 结构化事件图扩展 | graph/event ablation | [ ] |
 | P6 | 可选 renderer 审计闭环 | 失败样本渲染、跨外观/embodiment | [ ] |
 | P7 | 论文级对照和结论 | 等算力表、失败案例、idea 选择 | [ ] |
@@ -268,7 +268,75 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 
 动作条件的 DAgger、MPC 和控制回报评价保留到 Future 阶段，不作为当前训练配方的必需项。
 
-## 6.3 PISA Experiments 的正确角色
+## 6.3 预研确认清单：哪些事还没讨论充分
+
+以下事项必须在真正训练前确认，避免把不成立的假设写进主方法：
+
+- [ ] **数据可得性**：PhiZero 原 5M reasoner 训练集不随代码重发；若无法获得，只能用自建 captioned JSONL 或公开仿真/视频子集继续训练；
+- [ ] **状态标签字段**：逐一审计 Phyco、TDW、Physion、CLEVRER、IsaacLab/MuJoCo 输出，确认是否有统一坐标、速度、质量、接触、事件和相机参数；
+- [ ] **token 对齐方式**：确认 256 个 physical tokens 与 33 帧/8 个 latent transition 的对应关系，不能默认一个 token 对应一个物理时间步；
+- [ ] **对象对齐方式**：明确使用单主对象、固定 simulator object id，还是 permutation-invariant set prediction，避免多物体 token 被错误监督；
+- [ ] **MCP 推理含义**：区分 training-only MCP、parallel proposal + verification 和普通递归 AR，不能把训练多步监督直接写成推理加速；
+- [ ] **chunk 时间尺度**：从实际 temporal stride 推导 transition block 的秒数，不能直接假设 0.25 秒或 token-level 物理时间；
+- [ ] **prompt 策略**：PhiZero Reasoner 需要 caption/action intent；纯被动长预测必须固定 prompt 生成规则，避免 baseline 因 prompt 不公平；
+- [ ] **物理残差适用条件**：先定义哪些场景可用能量/动量守恒，哪些只能用边界连续、事件顺序或动量方向约束；
+- [ ] **闭环成本**：render-reencode 必须报告延迟、显存和 round-trip token drift，并与 token-only/hidden-state carry 对照；
+- [ ] **novelty 检索**：对“离散 physical token + long-horizon + explicit physics residual”做 scoop check 后再使用“第一个”表述；
+- [ ] **算力预算**：Reasoner full SFT、MCP head 训练、decoder inference 和 16--32s rollout 的 GPU/存储预算需要单独估算。
+
+### 数据角色与标签可得性
+
+| 数据 | 当前已确认的信息 | 可用于 | 训练前必须确认 |
+|---|---|---|---|
+| PhiZero 原 5M clips | 论文报告由真实视频和仿真视频组成；公开代码不重发完整 Reasoner JSONL | 继续预训练/复现原分布（若数据可得） | 下载权限、许可证、caption 和 token JSONL |
+| Phyco 126K | PhiZero 论文把它列为 tokenizer SFT 的仿真来源 | 物理表示和投影头候选 | 是否公开 GT position/velocity、object id、相机坐标 |
+| TDW / Physion / Physion++ | 可作为独立仿真/视觉物理数据源 | 投影头补充、跨域测试 | 状态字段、坐标系、对象追踪和 train/test split |
+| CLEVRER / ComPhy | 碰撞和事件推理数据 | event probe、碰撞专项 | 是否有足够长轨迹和可对齐状态 |
+| IsaacLab / MuJoCo 自建轨迹 | 可直接导出 qpos/qvel/contact/force | 长轨迹训练、条件化物理残差、长度外推 | 场景、质量、外力、摩擦和渲染设置固定 |
+| Physion / Physics-IQ / PhyGround / WorldModelBench | 主要是评测或理解基准 | 保持短程能力和物理事件评测 | 是否能把 token prediction 映射到统一指标 |
+
+“PhiZero 原训练集”和“Phyco 有 GT 状态”在当前仓库审计中都不能自动视为已获得；在数据 manifest 完成前，只能写成计划用途，不能写成已可训练资源。
+
+## 6.4 更新后的开工顺序
+
+### Step 1：probe 与数据 schema audit
+
+- [ ] 冻结 tokenizer，在 Phyco/TDW/Physion/CLEVRER 的小样本上导出 physical tokens；
+- [ ] 建立 `(token_embedding, hidden_state, state/event)` 对齐表；
+- [ ] 分别训练 Linear probe 和 2 层 MLP probe，记录 `(x,y,vx,vy)` 的 `R²`；
+- [ ] 做事件 probe，检查 token 是否包含 collision、contact、bounce、stop 等事件阶段；
+- [ ] 按 `R² > 0.7`、`0.4--0.7`、`<0.4` 决定投影头 A、B 或 fallback。
+
+### Step 2：离散版 MCP baseline
+
+- [ ] 先实现最小 K=4 multi-token/block prediction；
+- [ ] 再加入 token corruption、multi-layer feature fusion 和 chained MCP heads；
+- [ ] 与 one-step local AR、flat long AR、final-layer-only head 对照；
+- [ ] 暂不加入物理 loss，先确认 MCP 本身能降低长 horizon token/state/event error。
+
+### Step 3：投影头与条件化物理残差
+
+- [ ] 先离线训练投影头，确认 val `R²`、事件 F1 和跨数据集泛化；
+- [ ] 冻结投影头接入 Reasoner 训练回路；
+- [ ] 从 `L_boundary + L_event_order` 开始，再在满足条件的仿真子集上加入 `L_conditional_physics`；
+- [ ] 对比投影头接 token embedding、Reasoner hidden state、token block embedding 的差异。
+
+### Step 4：长 rollout 与重锚定
+
+- [ ] 评估 token-only rollout 到 4s、8s、16s、32s；
+- [ ] 加入 hidden-state carry，评估是否减少跨 chunk 边界跳变；
+- [ ] 加入 render-reencode，记录 round-trip token drift、延迟、显存和视频质量；
+- [ ] 明确 render-reencode 是上界/诊断还是默认推理模式。
+
+### Step 5：主实验与消融
+
+- [ ] 主配置：PhiZero original、+MCP、+MCP+physics residual、+MCP+physics residual+reanchor；
+- [ ] MCP ablation：corruption rate、fusion layers、head depth、initialization；
+- [ ] projection ablation：A vs B、loss weight、token embedding vs hidden state；
+- [ ] 主曲线：trajectory error、event F1、boundary jump、energy/momentum residual、latency vs horizon；
+- [ ] 保原榜：Physics-IQ Verified、PhyGround、WorldModelBench，确认短程能力没有明显下降。
+
+## 6.5 PISA Experiments 的正确角色
 
 PISA 很适合验证“模型是否理解掉落/碰撞/运动后果”，但不能单独支撑完整的动作条件 WAM：
 
