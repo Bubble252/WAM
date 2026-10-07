@@ -367,6 +367,137 @@ PISA 很适合验证“模型是否理解掉落/碰撞/运动后果”，但不�
 
 PISA 的视频指标主要面向生成视频。若主模型不生成像素，必须把模型输出映射到 object trajectory、contact/event 或 mask-level 预测，再报告状态/事件/规划指标；不能用视频 FVD 代替非像素世界模型评价。
 
+## 6.6 新增 benchmark 的接入协议
+
+三个 benchmark 的任务定义不同，按以下顺序接入：
+
+| Benchmark | 输入/输出 | 可以回答的问题 | 不应直接回答的问题 |
+|---|---|---|---|
+| ChronoPhyBench | 历史视频 + 文本/候选帧；输出选项、下一状态或帧序 | 模型是否利用视觉历史判断下一物理状态，是否会被文字先验带偏 | 不能单独证明 32 秒连续 rollout 稳定，也不能替代状态误差 |
+| Morpheus | 首帧/条件 + 生成视频；输出物理知觉分数 | renderer 生成的轨迹是否满足适用的方程和不变量 | token-only 输出没有视频时不能直接计算其官方分数 |
+| WorldOdysseyBench / WorldRoamBench | 初始场景 + 连续 WASD 等动作；输出交互视频和记忆结果 | 交互 world model 的动作响应、视觉漂移、物理和记忆是否稳定 | 当前无动作的 Passive Physical Dynamics 不能拿它的总分作主结论 |
+
+当前主评测协议固定为：
+
+```text
+MuJoCo state/event long-horizon  ← 主结果
+ChronoPhyBench                  ← 外部视觉物理理解
+Morpheus                        ← renderer/state-to-video 审计
+WorldRoamBench                  ← Future 控制阶段
+```
+
+报告时分别列出每个 benchmark 的版本、下载日期、输入模态、是否使用 renderer、是否重新读取真实观测，禁止把不同 benchmark 的分数平均成一个 WAM score。
+
+## 6.7 MuJoCo-WAM v1 数据集规格
+
+### 6.7.1 设计原则
+
+- [ ] 模型输入不含动作；`ctrl`、`xfrc_applied` 和接触冲量只作为 simulator metadata、物理诊断和后置控制数据；
+- [ ] 所有轨迹保存初始状态和高频 simulator state，8 FPS 视频只作为 PhiZero 对齐和视觉评测接口；
+- [ ] 训练和测试按轨迹/模板/参数组合切分，不能按相邻帧随机切分；
+- [ ] 每条轨迹带 `M_state`、`M_conservative`、`M_momentum`，物理 loss 由 mask 决定；
+- [ ] 对摩擦、阻尼、非弹性碰撞、固定地面接触和外力，不使用无条件的 `E_t=E_0`；
+- [ ] 记录生成 seed、MuJoCo 版本、MJCF、solver、integrator 和 camera 配置，确保可复现。
+
+### 6.7.2 场景家族
+
+首版使用 12 个现象家族，每个家族包含 4--6 个 MJCF 模板。模板内再随机化质量、尺寸、摩擦、初始状态、相机和材质：
+
+| 编号 | 场景家族 | 主要现象 | 必须覆盖的标签 |
+|---:|---|---|---|
+| 1 | Free fall / projectile | 重力、抛体、落地 | 位置、速度、重力势能、落地时刻 |
+| 2 | Elastic bounce | 弹性碰撞、反弹 | 接触对、法向速度、冲量、bounce event |
+| 3 | Inelastic collision | 动量交换和耗散 | 碰撞前后速度、质量、能量损失 |
+| 4 | Sliding / friction | 滑动、静摩擦、停止 | 接触、摩擦系数、停止时刻、耗散 mask |
+| 5 | Rolling body | 平动与转动耦合 | 姿态、线速度、角速度、滚动/滑动事件 |
+| 6 | Spring / oscillator | 弹簧、阻尼、周期变化 | 位移、速度、周期、弹性/阻尼参数 |
+| 7 | Simple / double pendulum | 二阶状态和相位记忆 | 关节角、角速度、相位、能量漂移 |
+| 8 | Ramp / obstacle | 支撑、越障、遮挡 | 相对高度、接触序列、遮挡 mask |
+| 9 | Stack / topple | 多物体支撑和倒塌 | 支撑图、接触拓扑、topple event |
+| 10 | Collision chain | 多体碰撞传播 | 事件顺序、传播延迟、物体 ID |
+| 11 | Hinge / lever | 铰链和刚体约束 | 关节状态、力矩、约束残差 |
+| 12 | Compositional scene | 重力 + 接触 + 摩擦组合 | 多事件组合、长程边界、OOD topology |
+
+前 7 类用于验证基本动力学和 projector；8--12 类用于长程组合、遮挡和多物体泛化。不要首轮加入 humanoid、复杂机器人控制或流体，它们会把控制和感知问题混入物理语言问题。
+
+### 6.7.3 推荐数量和切分
+
+Paper v1 生成 36,000 条 32 秒轨迹，即每个家族 3,000 条：
+
+| Split | 数量 | 生成规则 |
+|---|---:|---|
+| Train | 24,000 | 模板已见；初始状态和材质在训练范围内随机化 |
+| Validation | 6,000 | 模板已见；参数组合和随机种子不重叠 |
+| Test-interpolation | 3,000 | 模板已见；参数位于训练范围但组合未见 |
+| Test-OOD | 3,000 | 至少一项未见质量/摩擦/重力/相机/物体数/接触拓扑 |
+
+额外增加 6,000 条 Stress/OOD 轨迹，专门测试重力反转或幅度变化、质量比例、摩擦区间、未见物体数、遮挡和长 horizon。每条轨迹再导出 4 秒、8 秒、16 秒、32 秒窗口，但同一原始轨迹的窗口只能属于一个 split。
+
+最低可行 smoke 规模为 3,600 条（每家族 300 条）；若 smoke 阶段无法在状态误差、事件 F1 或长程漂移上击败 one-step/local-AR baseline，不进入 36,000 条完整生成。
+
+### 6.7.4 每条样本必须提供的信息
+
+MuJoCo 的 `qpos`/`qvel` 分别是广义位置和速度；自由关节/球关节的四元数使二者维度不一定一一对应，因此保存原始广义状态，同时导出 object-level pose/velocity，不能把 `qpos` 当成普通逐元素位置差分。
+
+1. **观测与时间**
+   - `rgb` 或 `video.mp4`、8 FPS 时间戳、首帧、分辨率和压缩参数；
+   - 可选 `segmentation`、`depth`、光流和 visibility/occlusion mask；
+   - camera intrinsics/extrinsics、相机轨迹、渲染 seed。
+2. **原始动力学状态**
+   - `time`、`qpos[T,nq]`、`qvel[T,nv]`、`act[T,na]`、`ctrl[T,nu]`；
+   - body/geom/joint 名称和稳定 ID；
+   - object-level `xpos`、`xquat`、linear velocity、angular velocity。
+3. **接触与力**
+   - contact pair、contact position/normal/distance、friction；
+   - normal/tangential impulse 或 force、`qfrc_constraint`；
+   - `qfrc_passive`、`qfrc_actuator`、`qfrc_applied`、`xfrc_applied`；
+   - contact start/end、impact、resting、sliding、rolling 事件。
+4. **物理参数和可用性 mask**
+   - gravity、timestep、integrator、solver、质量、惯量、关节限位；
+   - friction、damping、stiffness、contact `solref/solimp` 等参数；
+   - `M_state`、`M_conservative`、`M_momentum`、`external_work`；
+   - 轨迹级和区间级的 `kinetic_energy`、`potential_energy`、`total_energy`、linear/angular momentum。
+5. **事件和训练对齐**
+   - event type、event time、参与 object IDs、前后状态；
+   - 4/8/16/32 秒窗口、chunk/block 边界、PhiZero token 对齐索引；
+   - `scene_family`、template ID、difficulty、seed、split、MuJoCo/checkpoint version。
+
+推荐文件布局：
+
+```text
+mujoco_wam_v1/
+  manifests/{train,val,test_interp,test_ood,stress}.jsonl
+  mjcf/{family}/{template}.xml
+  state/{trajectory_id}.npz
+  events/{trajectory_id}.json
+  cameras/{trajectory_id}.json
+  video_8fps/{trajectory_id}.mp4
+  video_phizero/{trajectory_id}.mp4
+  README.md
+```
+
+状态文件应作为真值主源，视频只作为观测版本；不要从渲染视频反向估计能量和动量后再当作 oracle。
+
+### 6.7.5 与三个 benchmark 的适配
+
+- **ChronoPhyBench adapter**：从 MuJoCo 轨迹生成历史片段、正确下一帧、时间打乱帧和物理冲突文本，分别测 next-state selection、chronological sorting 和 hallucination stress。它是外部视觉接口，不能替代连续 state metric。
+- **Morpheus adapter**：使用 `video_phizero` 或 state-to-video 渲染结果，提供 object mask/track 和场景物理 metadata，再运行官方 tracker/scorer。只在符合其现象假设的 subset 上报告，不把摩擦/外力场景硬塞进保守系统评分。
+- **WorldRoam adapter**：暂不训练。Future 控制阶段再把 MuJoCo 的动作/相机轨迹导出为统一 action program，借用其 per-frame action、segment drift、interaction physics 和 memory 分项；被动阶段只记录哪些指标可迁移。
+
+### 6.7.6 验收与 Git
+
+- [ ] 12 类场景各至少生成 50 条 smoke 轨迹；
+- [ ] 自动检查无 NaN、穿透异常、能量/动量 mask 与外力字段一致；
+- [ ] 随机抽查 100 条视频，确认 object ID、mask、事件时间和状态数组对齐；
+- [ ] 用解析场景对照自由落体、简谐振子、无摩擦摆的误差；
+- [ ] 固定 10 个 seed 重生成，状态摘要和 manifest hash 可复现。
+
+```bash
+git add doc/01_project_background.md doc/03_execution_plan.md references/manifests
+git commit -m "docs: define benchmark roles and MuJoCo-WAM dataset spec"
+git push
+```
+
 ## 7. Future：动作条件反事实规划和控制（后置）
 
 - [ ] 当前阶段不执行；

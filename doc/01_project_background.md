@@ -371,6 +371,34 @@ E_phys = kinetic + potential + contact/work terms
 
 真实视频没有可靠质量、三维速度、接触冲量和外力时，不强行使用 `E_phys`；使用数据集提供的轨迹、mask、事件和物理不变量指标。
 
+## 7.4 Benchmark 分工与主结果边界
+
+截至 2026-10-07，三个新增 benchmark 应放在不同层级，不能合成一个总分：
+
+| Benchmark | 主要测量 | WAM 的使用方式 | 当前阶段定位 |
+|---|---|---|---|
+| **ChronoPhyBench** | 历史视频条件下的 next-state frame selection、chronological sorting、standard/hallucination QA | 用于外部视觉物理理解验证；若模型只输出 token/state，需要增加一个轻量 adapter 或把 MuJoCo 轨迹转成同格式的候选帧 | **次主评测** |
+| **Morpheus** | 生成视频是否满足守恒量和运动方程，提供 dynamical score、physical invariance 等物理知觉指标 | 只对 renderer 输出或 state-to-video 审计输出使用；token-only 主模型不能直接声称通过 Morpheus | **渲染审计/物理诊断** |
+| **WorldOdysseyBench / WorldRoamBench** | 交互式 world model 的逐帧动作、视觉漂移、可控物理和记忆；项目页面与论文版本的名称和案例数已有更新 | 先借用 segment drift、physics/3D consistency 和 memory 的拆分思想；动作接口、WASD 连续交互和 memory protocol 留到控制阶段 | **后置控制评测** |
+
+这里的名称需要记录清楚：用户所说的 **WorldOdysseyBench** 对应论文页面的早期名称；当前 arXiv/项目页面使用 **WorldRoamBench**。论文摘要报告 600+ cases，项目页面后来展示 1000+ cases，因此实验记录必须锁定具体版本和下载日期，不能混用两个数字。
+
+当前阶段的主结果仍应来自自建 MuJoCo 状态真值和长时域 rollout：`state error`、`event F1`、`event time error`、`boundary jump`、`energy/momentum drift`、`calibration` 和推理成本。ChronoPhyBench 用于验证模型是否能从视觉历史判断下一状态，Morpheus 用于验证可选渲染是否违反物理，WorldRoamBench 不作为无动作模型的主榜单。
+
+## 7.5 MuJoCo-WAM v1 的数据定位
+
+MuJoCo 数据集首轮服务三个目标：训练 projector 和条件化物理约束、提供 16--32 秒长时域状态真值、构造不依赖未来像素的主评测。模型输入仍然是被动观测历史，不输入动作；数据包可以保存 `ctrl`、外力和接触力，但这些字段只用于审计、能量 mask 和后续控制阶段。
+
+建议采用三档规模：
+
+| 规模 | 轨迹数 | 用途 | 视频保存策略 |
+|---|---:|---|---|
+| Smoke | 3,600（12 类 × 300） | 跑通生成、token 对齐、probe 和 loss | 全部低分辨率或只保存状态 |
+| **Paper v1** | **36,000（12 类 × 3,000）** | 主训练、验证、长时域和跨参数泛化 | 状态全量保存；约 25% 渲染视频，另保留 3,000 条 PhiZero 分辨率对照片段 |
+| Stress/OOD | 6,000 额外轨迹 | 未见质量/摩擦/重力/拓扑/相机组合 | 以状态和关键帧为主 |
+
+Paper v1 的每条轨迹建议模拟 32 秒，发布 8 FPS 的观测序列，并保留更高频的状态采样。这样可得到约 9.2M 个 8 FPS 帧；训练窗口从同一轨迹切出，但 train/val/test 必须按轨迹、模板和参数组合切分，不能把相邻窗口分到不同 split。
+
 ## 8. 必须保持诚实的边界
 
 - `physical language` 在 PhiZero 中是学习到的离散状态转移符号，不等于可读的自然语言，也不等于已知物理方程；
