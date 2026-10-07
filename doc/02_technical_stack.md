@@ -1,7 +1,7 @@
 # 技术栈与实现规格：物理语言、非显式动力学与可选渲染
 
-**版本**：Research design draft v0.3
-**日期**：2026-09-29
+**版本**：Research design draft v0.4
+**日期**：2026-10-07
 **原则**：先冻结接口与评价，再下载大仓库、模型和数据；所有状态表示都必须能被保存、重放、干预和比较。
 
 ## 1. 目录规划
@@ -176,44 +176,103 @@ MCP 的“多 chunk 并行”首先指训练时同时提供多个未来 block �
 
 如果没有 block verification 或 speculative decoding，不能把 MCP 写成推理加速方法。
 
-### 5.0.1 投影头与物理残差
+### 5.0.1 LaWM 风格的层级物理 transition
 
-投影头先作为一次性 probe，再决定是否进入训练回路。
+物理一致性的核心不再是对普通 token transition 添加一个事后能量惩罚，而是借鉴 LaWM：在连续 generalized coordinate 上学习离散 Lagrangian，并用离散 Euler--Lagrange（DEL）条件定义下一状态的 rollout transition。PhiZero 的离散 token 仍然是训练目标和对外接口。
+
+```text
+PhiZero token blocks
+        │
+        ├── high-level chunk head: next 256-token chunk CE
+        └── low-level block head: 8 × 32-token transition blocks CE
+                │
+                ▼
+        block/chunk embedding e_k
+                │
+                ▼
+        q_k = projection(e_k)       # learned generalized coordinate
+                │
+                ▼
+        L_d(q_k, q_{k+1}; η), DEL residual, finite solver
+                │
+                ▼
+        q̂_{k+1} → token heads → future physical-language tokens
+```
+
+LaWM 中的 `q` 是学习到的 generalized coordinate，不默认等于真实 `(x,y,vx,vy)`；投影头是否能读出这些变量由数据 schema、probe 和 benchmark 决定。不能把整数 token id 直接当作可微物理坐标。
+
+离散 Lagrangian 可以采用 LaWM 的最小结构：
+
+```text
+v_k = (q_{k+1} - q_k) / h
+q̄_k = (q_k + q_{k+1}) / 2
+L_d(q_k, q_{k+1}; η)
+    = h [0.5 * v_kᵀ Mθ(q̄_k, η) v_k - Vθ(q̄_k, η)]
+```
+
+其中 `Mθ` 使用正值对角质量参数化，`Vθ` 是标量势能网络。sequence-level context 使用相邻 latent state 推断，并在一个 rollout horizon 内保持不变：
+
+```text
+η = gρ(q_{k-1}, q_k, q_k - q_{k-1})
+```
+
+下一状态不是先由普通网络生成、再进行整条轨迹优化，而是由有限步可微 DEL solver 得到：
+
+```text
+R_DEL =
+    D2 L_d(q_{k-1}, q_k; η)
+  + D1 L_d(q_k, q_{k+1}; η)
+
+q̂_{k+1} = Solve_N(q̂_{k-1}, q̂_k; η)
+```
+
+二阶 transition 需要两个相邻 latent states。初始化方式必须在 schema audit 中明确：两个观测/token blocks、首个 chunk 内的相邻 blocks，或由首帧和 caption 预测初始速度；不能隐含假设为已解决。
+
+#### Projection/state grounding
+
+投影头先作为一次性 probe，再决定如何接入训练：
 
 | 版本 | 输入 | 网络 | 使用条件 |
 |---|---|---|---|
-| A | 单 token embedding | `Linear(512,128) -> GELU -> Linear(128,4)` | `(q,p)` 线性或浅层非线性可读，`R² > 0.7` |
-| B | 整段 token embedding | 1D causal conv 或 2 层 tiny transformer | token 更像 delta，需要时间积分，`0.4 <= R² <= 0.7` |
+| A | 单 block/chunk embedding | `Linear(d,128) -> GELU -> Linear(128,s)` | benchmark 状态可由浅层映射读出 |
+| B | 整段 token/block embedding | 1D causal conv 或 2 层 tiny transformer | 状态需要时间积分或上下文 |
 | fallback | Reasoner hidden state | 同 A/B | token embedding 不够但 hidden state 可读 |
 
-这里的 `512` 只是待审计占位符，必须从实际 tokenizer/Reasoner checkpoint 读取 embedding dimension；不能把 PhiZero 的词表 token embedding、FSQ transition embedding 和 Qwen Reasoner hidden state 当成同一空间。
+这里的 `d` 和状态维度 `s` 都必须从 checkpoint 与 benchmark schema 读取。`R²` 只作为工程诊断，不能预先规定所有数据都必须预测 `(x,y,vx,vy)`。多物体场景仍需明确单主对象、固定 object id 或 permutation-invariant set 对齐。
 
-`R²` 阈值是工程决策规则，不是可迁移的理论界限。probe 报告必须同时包含常数/线性 baseline、验证集和跨数据集测试，并按对象级状态归一化，避免尺度大的坐标变量掩盖速度和接触变量失败。
-
-投影目标优先写成统一的可观测状态：
+#### Combined objective
 
 ```text
-state = (x, y, vx, vy[, z, vz, contact, event_phase])
+L_total =
+    L_AR
+  + λ_block L_block
+  + λ_chunk L_chunk
+  + λ_lat L_lat
+  + λ_DEL L_DEL
+  + λ_reg L_mass
+  + λ_state M_state L_state
+  + λ_energy M_conservative L_energy
 ```
 
-这里的 `state` 是对象级变量，不是整个场景的无歧义全局变量。多物体视频必须先固定一种对齐协议：
+- `L_AR`：PhiZero 原始 next-token CE；
+- `L_block`：32-token transition block 的局部多步 CE；
+- `L_chunk`：下一个 256-token chunk 的 CE；
+- `L_lat`：预测 generalized coordinate 与未来 token/观测编码得到的 stop-gradient latent 对齐；
+- `L_DEL`：离散 Euler--Lagrange residual；
+- `L_mass`：质量矩阵的参数正则；
+- `L_state`：只有 benchmark 提供状态标签时启用；
+- `L_energy`：只有质量、速度、接触、外力等字段足够完整时启用。
 
-- 单主对象：只选择数据集定义的被作用对象或运动主体；
-- 固定对象槽位：按 simulator object id 对齐，适合 Phyco/TDW/Physion 等有对象标识的数据；
-- 集合预测：使用 permutation-invariant set loss，适合对象数变化的场景。
+`M_state` 和 `M_conservative` 是数据条件 mask。LaWM 的 `DEL residual` 是 transition mechanism 的约束，不能和条件化 energy loss 混为同一项。
 
-不能把多个物体的 token embedding 直接平均后回归一个 `(x,y,vx,vy)`，否则投影头可能只学到场景/相机偏差。
-
-物理 loss 不默认严格守恒。推荐写成：
+同时报告两类能量：
 
 ```text
-L_phys = L_track
-       + λ_boundary L_boundary
-       + λ_event L_event_order
-       + λ_residual L_conditional_physics
+E_latent(q,v) = 0.5 * vᵀ Mθ(q,η) v + Vθ(q,η)
+E_phys = simulator-defined kinetic + potential + contact/work terms
 ```
 
-其中 `L_conditional_physics` 只在仿真数据提供质量、速度、接触、外力或可判断低耗散场景时启用。对于掉落、摩擦、非弹性碰撞和主动外力场景，应使用“能量变化是否与事件类型一致”或“边界状态是否连续”，而不是强行令 `E_t = E_0`。
+`E_latent` 用于 LaWM 机制诊断；`E_phys` 只在仿真器提供对应字段时计算。真实视频没有可靠质量、三维速度和外力时，不强行计算 `E_phys`。
 
 ### 5.0.2 三种长 rollout 模式
 
@@ -227,7 +286,7 @@ render-reencode 不能默认算免费闭环。它会重新依赖 decoder 的视�
 
 ### 5.0.3 Token block 与时间对齐
 
-PhiZero 的 released path 固定输入 33 帧、8 FPS 视频，并输出 256 个 physical-language symbols。论文方法将其解释为 9 个时间 latent 状态之间的 8 个 transition，每个 transition 使用 32 个 symbols。因此首轮应把一个 32-token group 作为最小 transition block；它不应被误称为一个物理时间步。
+PhiZero 的 released path 固定输入 33 帧、8 FPS 视频，并输出 256 个 physical-language symbols。论文方法将其解释为 9 个时间 latent 状态之间的 8 个 transition，每个 transition 使用 32 个 symbols。因此首轮应把一个 32-token group 作为最小 transition block；它不应被误称为一个物理时间步。层级模型的 high-level unit 是完整 256-token chunk，LaWM-style generalized coordinate 可以在 block 或 chunk 层建立，但选择必须与 rollout horizon 和二阶初始化方式一起记录。
 
 实际 block 时长必须由 tokenizer 的 temporal stride 和导出张量确认。不能直接把 256 token 均匀除成 0.25 秒 chunk，也不能默认单 token 具有独立的 `(x,y,vx,vy)` 语义。所有 MCP horizon、投影头标签和 16--32 秒外推曲线都要在 manifest 中记录：
 
@@ -334,7 +393,7 @@ rollout length → latency and GPU cost
 - consequence-only predictor（不渲染未来视频）；
 - oracle simulator state（仅作为上界，不作为公平 baseline）。
 
-阶段一关键消融：one-step passive、flat long AR、passive MCP、MCP + projection head、MCP + conditional physics residual、hidden-state carry、render-reencode、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
+阶段一关键消融：one-step passive、flat long AR、hierarchical MCP、MCP + LaWM transition、MCP + projection/state grounding、MCP + LaWM + projection、full model + conditional energy、hidden-state carry、render-reencode、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
 
 ## 8. 可复现记录
 

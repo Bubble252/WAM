@@ -1,7 +1,7 @@
 # WAM 终局：非显式像素世界模型与物理语言预测
 
-**版本**：Research design draft v0.3
-**日期**：2026-09-29
+**版本**：Research design draft v0.4
+**日期**：2026-10-07
 **参考论文**：[PhiZero: A World Model Built Around Physical Language](https://github.com/yaoyao-jpg/PhiZero)；本地 PDF：`/home/bubble/类脑计算/参考/WAM/PHIZERO.pdf`  
 **项目目标**：围绕 WAM（world/action model）探索“先预测世界状态转移，再按需渲染像素”的世界模型路线，并判断是否可以进一步做到不生成未来视频，只预测可用于理解、规划和控制的物理语言/结构化状态。
 
@@ -205,39 +205,75 @@ HG-PLM: MCP + persistent memory + global consistency
 
 > **现有物理语言模型主要在固定窗口内进行局部 token 自回归；我们引入 multi-horizon token 监督、持久物理记忆和跨片段全局一致性，使离散 physical language 在不生成未来像素的情况下稳定预测更长的被动物理演化。**
 
-其中只有三件事构成主线：
+主线收敛为两项：
 
-1. **离散表征**：外观与状态变化分离的 transition token；
-2. **长序列预测**：局部 token 预测加 multi-horizon block supervision；
-3. **全局稳定机制**：persistent memory、boundary consistency 和 transition composition。
+1. **层级离散预测**：以 256-token chunk 和 32-token transition block 为两个时间尺度，进行 multi-horizon token supervision；
+2. **结构化物理 transition**：用 LaWM 风格的 latent variational transition 建立跨 block/chunk 的物理一致性，再用 projection/state grounding 和条件化 energy loss 对接 benchmark。
 
-MCP 是训练目标；persistent memory 和 global consistency 才是长序列方法的核心；scheduled sampling 和历史 token 加噪是训练稳定性消融；未来的 DAgger、MPC 和控制回报评价单独作为后续阶段。
+Persistent memory、boundary consistency 和 transition composition 是上述 transition 的实现机制；scheduled sampling 和历史 token 加噪是训练稳定性消融；未来的 DAgger、MPC 和控制回报评价单独作为后续阶段。
 
 ### 7.1.1 更新后的可执行版本
 
 当前更稳妥的论文定位是：
 
-> **在冻结 PhiZero tokenizer/decoder 并保留离散 physical-language token 作为主推理接口的前提下，改造 Reasoner，使其从 4 秒固定窗口扩展到 16--32 秒长时序 rollout，并通过可观测物理状态约束减少跨窗口漂移。**
+> **在冻结 PhiZero tokenizer/decoder 并保留离散 physical-language token 作为主推理接口的前提下，改造 Reasoner，使其从 4 秒固定窗口扩展到 16--32 秒长时序 rollout，并用 LaWM 风格的变分 latent transition、可观测状态对齐和条件化物理诊断减少跨窗口漂移。**
 
 这个表述比“PhiZero 是单步模型”更准确。PhiZero 的 Reasoner 不是只输出一个 token，而是在 4 秒窗口内用 next-token 自回归目标生成 256 个离散 physical-language token。真正的问题是：这个目标主要监督固定窗口内的局部 token 序列，长时序只能通过 sliding-window 递归外推，跨窗口的物理状态、事件阶段和误差累积没有显式约束。
 
-首轮创新收敛为三件事：
+首轮创新收敛为两项，物理一致性内部再分成核心机制和辅助约束：
 
-1. **离散版 MCP/MTP**：把 Next Forcing 的 multi-chunk 监督改写到 FSQ physical-language token 上，对 next-1/next-2/next-3 token block 同时加交叉熵监督，缓解局部 next-token 目标的短视。
-2. **物理状态投影头**：先用 frozen tokenizer 的 token embedding 诊断 `(q, p)` 是否可读，再把投影头接入 Reasoner 训练，对长 rollout 的可观测轨迹施加物理残差。
-3. **推理再锚定**：将 render → re-encode 作为长 rollout 的闭环重锚定方案之一，同时保留 token-only rollout 作为低成本对照。
+1. **层级离散 MCP/MTP**：高层预测下一个 256-token chunk，低层预测 chunk 内的 32-token transition blocks；用 multi-horizon supervision 缓解局部 next-token 目标的短视。
+2. **LaWM 风格的物理一致性 transition**：将 token block/chunk embedding 映射到连续 generalized coordinate，学习离散 Lagrangian，并用离散 Euler--Lagrange（DEL）变分 transition 生成未来连续状态，再条件化生成 physical-language token。
+
+投影头负责把连续 latent 接到 benchmark 可测的状态/事件；能量 loss 只在数据字段足够完整且场景近似守恒时作为条件化辅助项。`render → re-encode` 是长 rollout 的重锚定对照，不是物理一致性的核心机制。
 
 因此，“离散 token + 长程 + 显式物理约束”可以作为方法组合的主线，但“第一个”必须先作为待检索假设写进 related-work 任务，不能在立项文档中直接断言。
 
-### 7.1.2 哪些前提还没有完全确认
+### 7.1.2 LaWM 借鉴后的物理一致性定义
+
+LaWM 的关键贡献不是在普通 transition 之后添加一个能量惩罚，而是让物理结构参与定义 latent transition。本项目保留 PhiZero 的离散 token 输出接口，在 token block/chunk 的连续表示上引入同类结构：
+
+```text
+physical-language tokens
+        ↓
+continuous block/chunk representation q
+        ↓
+learned discrete Lagrangian L_d(q_k, q_{k+1}; η)
+        ↓
+DEL residual and finite differentiable solve
+        ↓
+future q
+        ↓
+32-token blocks / 256-token chunks
+```
+
+LaWM 风格的核心训练项包括：
+
+```text
+L_total =
+    L_AR + λ_block L_block + λ_chunk L_chunk
+  + λ_lat L_lat + λ_DEL L_DEL + λ_reg L_mass
+  + λ_state M_state L_state
+  + λ_energy M_conservative L_energy
+```
+
+其中 `L_DEL` 约束离散作用量的驻定条件，`L_lat` 对齐预测 latent 与未来 token/观测得到的 stop-gradient latent，`L_state` 只在数据提供状态字段时启用，`L_energy` 只在质量、速度、外力、接触等条件足够明确的仿真片段启用。LaWM 的 latent energy drift、DEL residual 和 benchmark-specific physical invariance score 主要作为诊断指标，不能混写成一个适用于所有数据的能量守恒 loss。
+
+这里的 `q` 是学习到的 generalized coordinate，不默认等于 `(x,y,vx,vy)`。是否能从 `q` 读出这些变量，要由 probe 和 benchmark schema 决定。连续 latent 物理分支不能替代离散 token CE，而是为离散 token rollout 提供结构化的 transition carrier。
+
+LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数据 schema audit 中确定初始化方式：使用两个观测/token blocks、使用首个 chunk 内的相邻 blocks，或学习一个由首帧和 caption 条件化的初始速度；不能在没有说明的情况下直接宣称已实现二阶物理积分。
+
+### 7.1.3 哪些前提还没有完全确认
 
 以下事项需要在实验前确认，否则会影响方法是否成立：
 
 | 待确认点 | 为什么关键 | 建议验证 |
 |---|---|---|
-| token embedding 是否含有绝对状态 | 投影头要预测 `(x,y,vx,vy)`；若 token 只表示 delta，单 token MLP 会失败 | Linear/MLP probe，报告 `R²` 和事件 probe |
+| token/block representation 是否可读出 benchmark 状态 | LaWM 的 `q` 不默认是真实坐标，投影头输出必须由数据标签和 benchmark 决定 | schema audit、Linear/MLP probe、事件 probe |
 | 仿真数据是否提供统一坐标和速度 | Phyco、TDW、Physion、CLEVRER 的状态字段和相机坐标未必一致 | 先做数据 schema audit，不直接承诺可合并 |
-| 能量/动量是否应严格守恒 | 掉落、摩擦、碰撞、外力和非弹性接触会改变机械能 | 将 `L_cons` 写成条件化物理残差，只在满足条件的片段启用严格守恒 |
+| LaWM 的 DEL transition 适用范围 | 无外力、耗散、接触和形变场景不满足同一个 unforced variational assumption | 先在 physics-clean 仿真子集验证，再扩展到接触/耗散场景 |
+| 能量/动量是否可作为辅助 loss | 掉落、摩擦、碰撞、外力和非弹性接触会改变机械能 | 由数据字段建立 `M_conservative`，先作为诊断，再决定是否反传 |
+| 二阶 latent transition 如何初始化 | LaWM 需要 `q_{k-1}, q_k`，PhiZero 原生 reasoner 只有首帧和 caption | 比较双观测初始化、相邻 token block 初始化和学习初速度 |
 | render → re-encode 是否值得 | 它会重新引入 decoder 成本和渲染误差，也可能改变 token 分布 | 必须和 token-only rollout、hidden-state carry rollout 对照 |
 | PhiZero 原训练集是否可获得 | 公开代码不重发 5M reasoner 训练集；重新训练可能只能用自备 JSONL | 先记录可下载数据、许可证和存储预算 |
 | PhiZero passive baseline 如何设 prompt | 原 Reasoner 输入包含 caption/action intent；纯被动预测需要固定 prompt 规则 | 在 matched-data 里固定 caption 生成策略或使用 GT caption |
@@ -248,9 +284,10 @@ MCP 是训练目标；persistent memory 和 global consistency 才是长序列�
 首轮主方法保留：
 
 - PhiZero tokenizer/decoder 冻结；
-- Reasoner 上增加离散版 MCP heads；
-- probe 决定投影头方案 A/B；
-- 条件化物理残差；
+- Reasoner 上增加层级离散 MCP heads；
+- LaWM 风格的 latent Lagrangian、DEL residual 和有限步 differentiable solver；
+- probe 决定连续 generalized coordinate 到 benchmark 状态的 projection head；
+- 条件化 energy/momentum loss 作为辅助项和消融；
 - token-only、hidden-state carry、render-reencode 三种 rollout 对照；
 - 4s 到 32s 的长度课程和外推评测。
 
@@ -258,7 +295,7 @@ MCP 是训练目标；persistent memory 和 global consistency 才是长序列�
 
 - DPO 偏好优化：作为二阶段失败兜底，不能与 MCP 和物理残差同时首次启用；
 - Q-Former LoRA：只有 probe 失败且 Reasoner hidden state 也不可读时再启用；
-- 严格能量守恒：只作为可满足条件的仿真子集指标，不能当成所有物理场景的统一 loss；
+- 无条件严格能量守恒：只作为可满足条件的仿真子集诊断，不能当成所有物理场景的统一 loss；
 - “第一个” novelty：等 related work 和 scoop check 后再决定措辞。
 
 ### 7.2 核心、支撑项和 tricks
@@ -266,9 +303,11 @@ MCP 是训练目标；persistent memory 和 global consistency 才是长序列�
 | 组件 | 定位 | 首轮处理 |
 |---|---|---|
 | 离散 transition physical token | 核心表示 | 必做；与连续 latent、pixel 和 object-state baseline 对照 |
-| Multi-horizon token prediction（MCP/MTP） | 核心训练目标 | 必做；报告不同 horizon 的状态和事件误差 |
-| Persistent physical memory | 核心长序列机制 | 必做；记录跨 block 状态、阶段和不确定性 |
-| Boundary/composition/global consistency | 核心长序列机制 | 必做；验证窗口拼接和递归组合 |
+| Hierarchical multi-horizon token prediction（MCP/MTP） | 核心训练目标 | 必做；高层 chunk CE + 低层 block CE |
+| LaWM-style variational transition | 核心物理机制 | 必做；DEL-defined rollout，报告 DEL residual 和长程稳定性 |
+| Persistent physical memory | LaWM context/实现机制 | 必做；记录跨 block 状态、阶段和不确定性 |
+| Boundary/composition/global consistency | 物理一致性辅助机制 | 必做；验证窗口拼接和递归组合 |
+| Projection/state grounding | 可观测性支撑项 | 由 benchmark 标签决定输出变量和监督形式 |
 | Scheduled sampling | 训练稳定性消融 | 与 flat autoregressive baseline 分开比较 |
 | 历史 token 加噪 | 鲁棒性 regularizer | 后加；只在历史误差敏感实验中启用 |
 | 熵正则/码本利用率约束 | 防离散 token 坍缩 | 仅用于离散 tokenizer，并报告 perplexity/usage |
@@ -276,7 +315,7 @@ MCP 是训练目标；persistent memory 和 global consistency 才是长序列�
 | token 重复惩罚 | 解码技巧 | 只有出现重复退化时才加 |
 | 能量/动量损失 | 域特定物理先验 | 只在有质量、速度、接触和外力定义的仿真数据上启用 |
 
-首轮实验只保留一条清晰增量链：`one-step local AR → MCP/MTP → MCP + persistent memory → MCP + memory + global consistency`。scheduled sampling、历史噪声、RAG、熵正则和物理残差作为单独消融，不能与主方法同时无控制地堆叠。
+首轮实验只保留一条清晰增量链：`local AR → hierarchical MCP → MCP + LaWM transition → MCP + LaWM + projection → full model (+ conditional energy)`。scheduled sampling、历史噪声、RAG、熵正则和 render-reencode 作为单独消融，不能与主方法同时无控制地堆叠。
 
 ### 7.2.1 可选增强的边界
 
@@ -288,19 +327,33 @@ MCP 是训练目标；persistent memory 和 global consistency 才是长序列�
 | DPO/偏好优化 | 仿真器生成守恒/漂移 rollout pair | 二阶段兜底，需要可靠的偏好构造和 KL 控制 |
 | Q-Former LoRA | tokenizer 物理信息不足时 | 只有 probe 与 Reasoner hidden state 都失败才启用 |
 
-### 7.3 物理损失的边界
+### 7.3 物理一致性损失与诊断的边界
 
-通用真实视频不能直接使用能量/动量守恒损失。物体质量、三维速度、相机标定、接触冲量和外力通常不可观测；有摩擦、碰撞、驱动器或线缆时，系统本来也不是封闭守恒系统。推荐将其改成**带条件的物理残差**：只在仿真器提供 `qpos/qvel/contact/force` 的片段上计算，并把动作做功、摩擦耗散和外力项纳入残差。真实视频阶段使用轨迹、接触和事件指标，不强行套守恒公式。
-
-在理想的低耗散、无外力片段上，可以检查：
+LaWM 风格的物理约束优先作用在 transition rule：
 
 ```text
-E_mech(t) = Σ_i 0.5 m_i ||v_i(t)||² + m_i g y_i(t) + U_contact(t)
-r_E(t) = E_mech(t+1) - E_mech(t) - W_external(t) + D_friction(t)
-r_p(t) = p(t+1) - p(t) - J_external(t)
+L_d(q_k, q_{k+1}; η)
+R_DEL = D2 L_d(q_{k-1}, q_k; η) + D1 L_d(q_k, q_{k+1}; η)
+q̂_{k+1} = Solve_N(q̂_{k-1}, q̂_k; η)
 ```
 
-只有在 `W_external`、`D_friction` 或 `J_external` 可估计时，残差才有物理含义。否则使用轨迹边界连续性、事件顺序和动量方向等弱约束。
+因此 `L_DEL` 不是生成完成后再优化整条轨迹的 post-hoc refinement。预测的下一状态应由有限步 DEL solver 产生，再由 token head 生成离散 physical language。
+
+投影头和能量项承担不同角色：
+
+- projection head 将 generalized coordinate 接到 benchmark 可测状态/事件；
+- `L_state` 在有 GT 状态时提供 grounding；
+- `L_energy` 只在 `M_conservative=1` 的近似封闭仿真片段启用；
+- `EnergyDrift`、`R_DEL`、PIS、state RMSE 和 event metrics 分开报告。
+
+Latent energy 与 simulator physical energy 不能混为一谈：
+
+```text
+E_latent(q,v) = 0.5 * vᵀ Mθ(q,η) v + Vθ(q,η)
+E_phys = kinetic + potential + contact/work terms
+```
+
+真实视频没有可靠质量、三维速度、接触冲量和外力时，不强行使用 `E_phys`；使用数据集提供的轨迹、mask、事件和物理不变量指标。
 
 ## 8. 必须保持诚实的边界
 

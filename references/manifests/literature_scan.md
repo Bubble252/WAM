@@ -1,6 +1,6 @@
 # 非像素世界模型 idea 调查记录
 
-**调查日期**：2026-09-26  
+**调查日期**：2026-10-07
 **主要来源**：PhiZero 预印本的 Related Work/Appendix D、公开论文元数据、PhiZero 官方 README。该记录用于生成研究假设，不代表每个方向都已完成复现。
 
 ## 1. 相关路线对照
@@ -12,6 +12,7 @@
 | latent-action world model | Genie、Adaworld、Motus、Co-evolving latent action、DILA、Factored LAWMs | 从相邻观测反推 latent action，再做 forward model | 可以从无动作视频学习可控制的转移变量 | 多数面向控制/特定 embodiment，开放世界物理状态覆盖有限 |
 | 物理/事件推理 | Physion、IntPhys2、ComPhy、CLEVRER | 物体、碰撞、事件和合理性判断 | 可以用独立事件指标评价 world model，而不是只看视频质量 | 事件标签、跟踪和遮挡鲁棒性仍是瓶颈 |
 | 视频 tokenizer | Divot、Vtok、Vidtwin、TivTok、content-frame/motion-latent 分解 | 压缩 token、内容/运动分解 | 为物理语言提供 tokenizer 和 decoder 设计 | 压缩 token 可能仍编码外观，必须做交换首帧/交换转移的干预测试 |
+| 变分 latent world model | **LaWM（Least Action World Models）** | learned generalized coordinates、离散 Lagrangian、DEL variational transition | 物理结构可以直接定义 latent rollout rule，而不只是作为 post-hoc loss；可借鉴 `L_lat + L_DEL + L_reg`、PIS、DEL residual 和 energy-drift diagnostics | LaWM 的连续 latent 与 PhiZero 离散 token 不同；二阶状态初始化、耗散/接触和 token-to-latent bridge 需要重新设计 |
 | 显式物理约束 | PhysAlign、simulator-in-the-loop、WISA、Think before diffuse | 物理特征、3D 或规则 | 可做强对照或独立 evaluator | simulator/3D 依赖大，且可能把先验限制在特定领域 |
 | Physical language | PhiZero、UNIT（论文引用） | 离散状态转移符号 | reason-then-render，支持跨外观/embodiment 接口 | 符号仍是经验性的，不直接对应物理量或方程 |
 
@@ -22,6 +23,7 @@
 3. **latent action 与 physical language 要区分**：latent action 主要表示“采取了什么动作/控制效果”，physical language 试图表示“世界如何演化”。实验必须加入无动作观察、同动作不同场景、同转移不同外观三种对照，避免把二者混为一谈。
 4. **评价应从视频质量转为后果质量**：至少需要 multi-step state error、事件/接触 F1、反事实动作排序、闭环 success、uncertainty calibration 和推理成本；视频只作为失败审计或可视化。
 5. **最有风险的是因果幻觉**：renderer 可以把错误 latent 变成视觉上连贯的视频。必须使用错动作、错 token、局部关系干预和遮挡测试，验证模型的因果敏感性。
+6. **物理一致性不能只写成能量正则**：LaWM 的关键差异是用离散 Euler--Lagrange 条件定义 latent transition。对 WAM，LaWM 应作为物理 rollout mechanism，projection/state grounding 和条件化能量项作为辅助分支；能量 drift 与 PIS 作为独立诊断。
 
 ## 3. 形成的可检验 idea
 
@@ -76,3 +78,4 @@
 - Learning latent action world models in the wild：<https://arxiv.org/abs/2601.05230>
 - Factored latent action world models：<https://arxiv.org/abs/2602.16229>
 - DILA：<https://arxiv.org/abs/2605.15725>
+- LaWM：本地参考文档 [`参考/WAM/LaWM.pdf`](../../../参考/WAM/LaWM.pdf)
