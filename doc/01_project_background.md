@@ -379,11 +379,32 @@ E_phys = kinetic + potential + contact/work terms
 |---|---|---|---|
 | **ChronoPhyBench** | 历史视频条件下的 next-state frame selection、chronological sorting、standard/hallucination QA | 用于外部视觉物理理解验证；若模型只输出 token/state，需要增加一个轻量 adapter 或把 MuJoCo 轨迹转成同格式的候选帧 | **次主评测** |
 | **Morpheus** | 生成视频是否满足守恒量和运动方程，提供 dynamical score、physical invariance 等物理知觉指标 | 只对 renderer 输出或 state-to-video 审计输出使用；token-only 主模型不能直接声称通过 Morpheus | **渲染审计/物理诊断** |
-| **WorldOdysseyBench / WorldRoamBench** | 交互式 world model 的逐帧动作、视觉漂移、可控物理和记忆；项目页面与论文版本的名称和案例数已有更新 | 先借用 segment drift、physics/3D consistency 和 memory 的拆分思想；动作接口、WASD 连续交互和 memory protocol 留到控制阶段 | **后置控制评测** |
+| **WorldOdysseyBench** | 交互式 world model 的逐帧动作、视觉漂移、可控物理和记忆 | 先借用 segment drift、physics/3D consistency 和 memory 的拆分思想；动作接口、WASD 连续交互和 memory protocol 留到控制阶段 | **后置控制评测** |
 
-这里的名称需要记录清楚：用户所说的 **WorldOdysseyBench** 对应论文页面的早期名称；当前 arXiv/项目页面使用 **WorldRoamBench**。论文摘要报告 600+ cases，项目页面后来展示 1000+ cases，因此实验记录必须锁定具体版本和下载日期，不能混用两个数字。
+这里统一使用 **WorldOdysseyBench** 这个项目名称。当前公开摘要描述的是 600+ 个测试案例、自然/城市/室内场景、第一/第三人称视角和 10--60 秒 WASD 连续交互；实验记录仍需锁定论文版本和下载日期。
 
-当前阶段的主结果仍应来自自建 MuJoCo 状态真值和长时域 rollout：`state error`、`event F1`、`event time error`、`boundary jump`、`energy/momentum drift`、`calibration` 和推理成本。ChronoPhyBench 用于验证模型是否能从视觉历史判断下一状态，Morpheus 用于验证可选渲染是否违反物理，WorldRoamBench 不作为无动作模型的主榜单。
+当前阶段的主结果仍应来自自建 MuJoCo 状态真值和长时域 rollout：`state error`、`event F1`、`event time error`、`boundary jump`、`energy/momentum drift`、`calibration` 和推理成本。ChronoPhyBench 用于验证模型是否能从视觉历史判断下一状态，Morpheus 用于验证可选渲染是否违反物理，WorldOdysseyBench 不作为无动作模型的主榜单。
+
+### 7.4.1 六个 benchmark 的适配度排序
+
+| 优先级 | Benchmark | 对当前 WAM 的最合适用途 | 主要原因 |
+|---:|---|---|---|
+| 1 | **ChronoPhyBench** | 当前无动作主线的外部视觉评测 | 直接测历史视频到下一状态和多帧时间顺序，和被动 physical dynamics 最接近 |
+| 2 | **Morpheus** | projector/energy loss 的渲染审计 | 用守恒量和运动方程评分，物理诊断最硬，但要求视频或 state-to-video 输出 |
+| 3 | **Physics-IQ Verified** | 和 PhiZero 的公平视频 baseline | PhiZero 已有公开结果，适合验证长程增强是否损害原有视频物理能力 |
+| 4 | **WorldOdysseyBench** | Future 动作条件和长时域控制 | 长度和稳定性最符合最终愿景，但需要 WASD/action 接口，当前被动模型不能直接参赛 |
+| 5 | **PhyGround** | 按物理定律拆分的 renderer 诊断 | 13 条物理定律和逐定律指标有解释性，但主要是生成视频 + judge |
+| 6 | **WorldModelBench** | 通用 world-model 兼容性补充 | 覆盖面广、PhiZero 可对齐，但物理指标较粗，不能替代状态真值和长 rollout |
+
+因此当前论文不应选择一个 benchmark 代替全部评价，而应采用：
+
+```text
+主结果：MuJoCo state/event long-horizon
+外部被动评测：ChronoPhyBench
+物理约束审计：Morpheus
+PhiZero 视频对照：Physics-IQ Verified + PhyGround + WorldModelBench
+后置控制评测：WorldOdysseyBench
+```
 
 ## 7.5 MuJoCo-WAM v1 的数据定位
 

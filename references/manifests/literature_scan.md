@@ -17,7 +17,7 @@
 | Physical language | PhiZero、UNIT（论文引用） | 离散状态转移符号 | reason-then-render，支持跨外观/embodiment 接口 | 符号仍是经验性的，不直接对应物理量或方程 |
 | 时间物理推理 benchmark | **ChronoPhyBench** | 历史视频、下一状态候选、时间排序和冲突文本 QA | 可检验模型是否真的使用视觉历史，并为 physical-language-only 模型提供外部视觉对照 | 主要是选择/问答协议，不直接给出连续轨迹误差或 32 秒 rollout |
 | 物理视频生成评估 | **Morpheus** | 真实实验视频、轨迹方程和守恒量评分 | 可作为 renderer/state-to-video 的物理审计器，独立于主观观感 | token-only 输出不能直接套官方视频评分；现象和守恒假设必须匹配 |
-| 交互式长时域评测 | **WorldOdysseyBench / WorldRoamBench** | WASD 交互视频、逐帧动作、视觉漂移、物理和记忆 | 可借用 drift、interaction physics 和 memory 的分项设计 | 当前是动作条件 interactive world model；不适合作为阶段一无动作主榜单 |
+| 交互式长时域评测 | **WorldOdysseyBench** | WASD 交互视频、逐帧动作、视觉漂移、物理和记忆 | 可借用 drift、interaction physics 和 memory 的分项设计 | 当前是动作条件 interactive world model；不适合作为阶段一无动作主榜单 |
 
 ## 2. 关键判断
 
@@ -27,7 +27,7 @@
 4. **评价应从视频质量转为后果质量**：至少需要 multi-step state error、事件/接触 F1、反事实动作排序、闭环 success、uncertainty calibration 和推理成本；视频只作为失败审计或可视化。
 5. **最有风险的是因果幻觉**：renderer 可以把错误 latent 变成视觉上连贯的视频。必须使用错动作、错 token、局部关系干预和遮挡测试，验证模型的因果敏感性。
 6. **物理一致性不能只写成能量正则**：LaWM 的关键差异是用离散 Euler--Lagrange 条件定义 latent transition。WAM 首轮采用 projector、状态/连续性约束和条件化能量项；LaWM 的 `L_DEL`/solver 作为独立增强与消融。只有 solver 真正定义下一 latent state 时，才把该配置称为 hybrid LaWM variant；能量 drift 与 PIS 始终作为独立诊断。
-7. **三个 benchmark 必须分工使用**：ChronoPhyBench 负责视觉历史和下一状态/时间顺序，Morpheus 负责可渲染输出的物理知觉审计，WorldOdysseyBench/WorldRoamBench 负责未来交互控制、漂移和记忆。它们不能平均成一个总分，也不能用其中一个替代 MuJoCo 的连续状态真值。
+7. **六个 benchmark 必须分工使用**：ChronoPhyBench 负责视觉历史和下一状态/时间顺序，Morpheus 负责可渲染输出的物理知觉审计，Physics-IQ Verified、PhyGround 和 WorldModelBench 负责 PhiZero 可对齐的视频物理对照，WorldOdysseyBench 负责未来交互控制、漂移和记忆。它们不能平均成一个总分，也不能用其中一个替代 MuJoCo 的连续状态真值。
 
 ## 3. 形成的可检验 idea
 
@@ -84,6 +84,6 @@
 - DILA：<https://arxiv.org/abs/2605.15725>
 - ChronoPhyBench：<https://arxiv.org/abs/2606.07962>；代码/数据接口：<https://github.com/huangchong-yan/ChronoPhyBench>
 - Morpheus：<https://arxiv.org/abs/2504.02918>；代码：<https://github.com/physics-from-video/Morpheus>
-- WorldRoamBench（早期页面名 WorldOdysseyBench）：<https://arxiv.org/abs/2606.31672>；项目页：<https://worldroam.amap.com/>
+- WorldOdysseyBench：<https://huggingface.co/papers/2606.31672>；arXiv 记录：<https://arxiv.org/abs/2606.31672>
 - MuJoCo 状态与接触字段：<https://mujoco.readthedocs.io/en/latest/programming/simulation.html>、<https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html>
 - LaWM：本地参考文档 [`参考/WAM/LaWM.pdf`](../../../参考/WAM/LaWM.pdf)

@@ -375,7 +375,7 @@ PISA 的视频指标主要面向生成视频。若主模型不生成像素，必
 |---|---|---|---|
 | ChronoPhyBench | 历史视频 + 文本/候选帧；输出选项、下一状态或帧序 | 模型是否利用视觉历史判断下一物理状态，是否会被文字先验带偏 | 不能单独证明 32 秒连续 rollout 稳定，也不能替代状态误差 |
 | Morpheus | 首帧/条件 + 生成视频；输出物理知觉分数 | renderer 生成的轨迹是否满足适用的方程和不变量 | token-only 输出没有视频时不能直接计算其官方分数 |
-| WorldOdysseyBench / WorldRoamBench | 初始场景 + 连续 WASD 等动作；输出交互视频和记忆结果 | 交互 world model 的动作响应、视觉漂移、物理和记忆是否稳定 | 当前无动作的 Passive Physical Dynamics 不能拿它的总分作主结论 |
+| WorldOdysseyBench | 初始场景 + 连续 WASD 等动作；输出交互视频和记忆结果 | 交互 world model 的动作响应、视觉漂移、物理和记忆是否稳定 | 当前无动作的 Passive Physical Dynamics 不能拿它的总分作主结论 |
 
 当前主评测协议固定为：
 
@@ -383,7 +383,7 @@ PISA 的视频指标主要面向生成视频。若主模型不生成像素，必
 MuJoCo state/event long-horizon  ← 主结果
 ChronoPhyBench                  ← 外部视觉物理理解
 Morpheus                        ← renderer/state-to-video 审计
-WorldRoamBench                  ← Future 控制阶段
+WorldOdysseyBench               ← Future 控制阶段
 ```
 
 报告时分别列出每个 benchmark 的版本、下载日期、输入模态、是否使用 renderer、是否重新读取真实观测，禁止把不同 benchmark 的分数平均成一个 WAM score。
@@ -482,7 +482,7 @@ mujoco_wam_v1/
 
 - **ChronoPhyBench adapter**：从 MuJoCo 轨迹生成历史片段、正确下一帧、时间打乱帧和物理冲突文本，分别测 next-state selection、chronological sorting 和 hallucination stress。它是外部视觉接口，不能替代连续 state metric。
 - **Morpheus adapter**：使用 `video_phizero` 或 state-to-video 渲染结果，提供 object mask/track 和场景物理 metadata，再运行官方 tracker/scorer。只在符合其现象假设的 subset 上报告，不把摩擦/外力场景硬塞进保守系统评分。
-- **WorldRoam adapter**：暂不训练。Future 控制阶段再把 MuJoCo 的动作/相机轨迹导出为统一 action program，借用其 per-frame action、segment drift、interaction physics 和 memory 分项；被动阶段只记录哪些指标可迁移。
+- **WorldOdysseyBench adapter**：暂不训练。Future 控制阶段再把 MuJoCo 的动作/相机轨迹导出为统一 action program，借用其 per-frame action、segment drift、interaction physics 和 memory 分项；被动阶段只记录哪些指标可迁移。
 
 ### 6.7.6 验收与 Git
 
