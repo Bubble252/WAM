@@ -432,7 +432,11 @@ Paper v1 的每条轨迹建议模拟 32 秒，发布 8 FPS 的观测序列，并
 
 相关路线的调查记录见 [`references/manifests/literature_scan.md`](../references/manifests/literature_scan.md)，其中区分了 latent video prediction、latent-action world model、事件/物理推理、视频 tokenizer 和 PhiZero physical language。
 
-1. `WAM终局` 已初始化独立本地 Git；是否需要绑定并推送到已有远端；
-2. 首轮环境优先选 LIBERO/BridgeData 类机器人数据、视频物理数据，还是先用可控的 2D/小型仿真环境；
-3. 目标是先做 idea 设计与 smoke test，还是立即进入完整训练和论文复现；
-4. 可用 GPU、存储和网络代理条件决定是否下载大模型、视频数据和 Wan/PhiZero 相关权重。
+1. **输入历史**：首轮默认使用最近 4 秒、8 FPS 的观测历史，还是严格复刻 PhiZero 的首帧加固定 neutral prompt；
+2. **输出粒度**：保持 256-token chunk、32-token transition block 和 4/8/16/32 秒 horizon，还是先只跑单 block smoke test；
+3. **对象与状态 schema**：先做单主对象，还是直接做固定 object ID 的多物体状态和事件集合；
+4. **被动场景边界**：首轮是否固定 `ctrl=0`、无时变外力，只随机化初始状态；带外力/动作的轨迹全部留到 Future；
+5. **PhiZero 资源**：官方 tokenizer/reasoner/decoder 权重和训练 JSONL 是否可用；若不可用，先用 MuJoCo state tokenizer 验证接口，但不声称完成 PhiZero 数值复现；
+6. **算力与存储**：先生成 3,600 条 smoke 轨迹，还是直接生成 36,000 条 Paper v1；GPU 数量、显存和视频存储决定选择。
+
+Git 远端已经配置为 `origin`，文档和研究设计已推送；以上六项才是进入训练前的实际确认点。
