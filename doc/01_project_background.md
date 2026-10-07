@@ -208,22 +208,22 @@ HG-PLM: MCP + persistent memory + global consistency
 主线收敛为两项：
 
 1. **层级离散预测**：以 256-token chunk 和 32-token transition block 为两个时间尺度，进行 multi-horizon token supervision；
-2. **结构化物理 transition**：用 LaWM 风格的 latent variational transition 建立跨 block/chunk 的物理一致性，再用 projection/state grounding 和条件化 energy loss 对接 benchmark。
+2. **可观测物理约束**：用 projector 把 block/chunk 表示接到 benchmark 可测状态，再加入条件化的状态、连续性和能量/动量约束；LaWM 的 DEL 形式先作为独立增强和消融，不把它预先写成首轮的 transition solver。
 
-Persistent memory、boundary consistency 和 transition composition 是上述 transition 的实现机制；scheduled sampling 和历史 token 加噪是训练稳定性消融；未来的 DAgger、MPC 和控制回报评价单独作为后续阶段。
+Persistent memory、boundary consistency 和 transition composition 是上述长程预测的实现机制；scheduled sampling 和历史 token 加噪是训练稳定性消融；未来的 DAgger、MPC 和控制回报评价单独作为后续阶段。
 
 ### 7.1.1 更新后的可执行版本
 
 当前更稳妥的论文定位是：
 
-> **在冻结 PhiZero tokenizer/decoder 并保留离散 physical-language token 作为主推理接口的前提下，改造 Reasoner，使其从 4 秒固定窗口扩展到 16--32 秒长时序 rollout，并用 LaWM 风格的变分 latent transition、可观测状态对齐和条件化物理诊断减少跨窗口漂移。**
+> **在冻结 PhiZero tokenizer/decoder 并保留离散 physical-language token 作为主推理接口的前提下，改造 Reasoner，使其从 4 秒固定窗口扩展到 16--32 秒长时序 rollout，并用层级多步监督、可观测状态投影和条件化物理约束减少跨窗口漂移。**
 
 这个表述比“PhiZero 是单步模型”更准确。PhiZero 的 Reasoner 不是只输出一个 token，而是在 4 秒窗口内用 next-token 自回归目标生成 256 个离散 physical-language token。真正的问题是：这个目标主要监督固定窗口内的局部 token 序列，长时序只能通过 sliding-window 递归外推，跨窗口的物理状态、事件阶段和误差累积没有显式约束。
 
 首轮创新收敛为两项，物理一致性内部再分成核心机制和辅助约束：
 
 1. **层级离散 MCP/MTP**：高层预测下一个 256-token chunk，低层预测 chunk 内的 32-token transition blocks；用 multi-horizon supervision 缓解局部 next-token 目标的短视。
-2. **LaWM 风格的物理一致性 transition**：将 token block/chunk embedding 映射到连续 generalized coordinate，学习离散 Lagrangian，并用离散 Euler--Lagrange（DEL）变分 transition 生成未来连续状态，再条件化生成 physical-language token。
+2. **投影器和条件化物理约束**：将 token block/chunk embedding 映射到连续的 generalized coordinate 或 benchmark 状态，使用状态、轨迹连续性和适用场景下的能量/动量残差约束长程 rollout；LaWM 的离散 Lagrangian/DEL transition 作为后续机制级增强。
 
 投影头负责把连续 latent 接到 benchmark 可测的状态/事件；能量 loss 只在数据字段足够完整且场景近似守恒时作为条件化辅助项。`render → re-encode` 是长 rollout 的重锚定对照，不是物理一致性的核心机制。
 
@@ -231,37 +231,40 @@ Persistent memory、boundary consistency 和 transition composition 是上述 tr
 
 ### 7.1.2 LaWM 借鉴后的物理一致性定义
 
-LaWM 的关键贡献不是在普通 transition 之后添加一个能量惩罚，而是让物理结构参与定义 latent transition。本项目保留 PhiZero 的离散 token 输出接口，在 token block/chunk 的连续表示上引入同类结构：
+本项目首轮只借鉴 LaWM 的连续状态表达、作用量/残差诊断和物理约束组织方式，不宣称已经复现 LaWM 的变分积分器。原因是 PhiZero 的 Reasoner 仍然负责离散 token 的下一段预测，而 LaWM 的核心是由离散 Euler--Lagrange（DEL）条件直接定义连续 latent 的转移。两者分成两级：
+
+1. **主线（可直接实现）**：token block/chunk embedding → projector → `q`/状态量，使用 `L_state`、`L_smooth` 和有条件 mask 的 `L_energy`；Reasoner 仍决定下一段 token。
+2. **增强（单独消融）**：在同一 projector 上增加 learned discrete Lagrangian 和 `L_DEL` residual；只有当下一状态由有限步 DEL solver 产生时，才称为 hybrid LaWM variant。
+
+主线结构为：
 
 ```text
 physical-language tokens
         ↓
-continuous block/chunk representation q
+continuous block/chunk representation e
         ↓
-learned discrete Lagrangian L_d(q_k, q_{k+1}; η)
+projector: e → q (and v)
         ↓
-DEL residual and finite differentiable solve
-        ↓
-future q
+state / continuity / conditional physics losses
         ↓
 32-token blocks / 256-token chunks
 ```
 
-LaWM 风格的核心训练项包括：
+主线训练项写成：
 
 ```text
 L_total =
     L_AR + λ_block L_block + λ_chunk L_chunk
-  + λ_lat L_lat + λ_DEL L_DEL + λ_reg L_mass
   + λ_state M_state L_state
+  + λ_smooth L_smooth
   + λ_energy M_conservative L_energy
 ```
 
-其中 `L_DEL` 约束离散作用量的驻定条件，`L_lat` 对齐预测 latent 与未来 token/观测得到的 stop-gradient latent，`L_state` 只在数据提供状态字段时启用，`L_energy` 只在质量、速度、外力、接触等条件足够明确的仿真片段启用。LaWM 的 latent energy drift、DEL residual 和 benchmark-specific physical invariance score 主要作为诊断指标，不能混写成一个适用于所有数据的能量守恒 loss。
+其中 `L_state` 只在数据提供状态字段时启用，`L_smooth` 约束相邻预测状态或 block 边界的跳变，`L_energy` 只在质量、速度、外力、接触等条件足够明确的仿真片段启用。`L_smooth` 不是 LaWM 的 stationary-action 条件，只是对离散长序列有效的连续性正则。LaWM 的 `L_DEL`、latent energy drift 和 benchmark-specific physical invariance score 单独作为增强或诊断，不能混写成一个适用于所有数据的能量守恒 loss。
 
-这里的 `q` 是学习到的 generalized coordinate，不默认等于 `(x,y,vx,vy)`。是否能从 `q` 读出这些变量，要由 probe 和 benchmark schema 决定。连续 latent 物理分支不能替代离散 token CE，而是为离散 token rollout 提供结构化的 transition carrier。
+这里的 `q` 是学习到的 generalized coordinate，不默认等于 `(x,y,vx,vy)`。是否能从 `q` 读出这些变量，要由 probe 和 benchmark schema 决定。连续 projector 分支不能替代离散 token CE，而是为离散 token rollout 提供可观测的状态锚点；只有加入 DEL solver 并让 solver 产生下一状态时，连续分支才升级为 transition carrier。
 
-LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数据 schema audit 中确定初始化方式：使用两个观测/token blocks、使用首个 chunk 内的相邻 blocks，或学习一个由首帧和 caption 条件化的初始速度；不能在没有说明的情况下直接宣称已实现二阶物理积分。
+LaWM 的二阶 transition 需要两个相邻 latent states。首轮只在 DEL 增强实验中确认初始化方式：使用两个观测/token blocks、使用首个 chunk 内的相邻 blocks，或学习一个由首帧和 caption 条件化的初始速度；不能在没有说明的情况下直接宣称已实现二阶物理积分。
 
 ### 7.1.3 哪些前提还没有完全确认
 
@@ -271,9 +274,9 @@ LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数�
 |---|---|---|
 | token/block representation 是否可读出 benchmark 状态 | LaWM 的 `q` 不默认是真实坐标，投影头输出必须由数据标签和 benchmark 决定 | schema audit、Linear/MLP probe、事件 probe |
 | 仿真数据是否提供统一坐标和速度 | Phyco、TDW、Physion、CLEVRER 的状态字段和相机坐标未必一致 | 先做数据 schema audit，不直接承诺可合并 |
-| LaWM 的 DEL transition 适用范围 | 无外力、耗散、接触和形变场景不满足同一个 unforced variational assumption | 先在 physics-clean 仿真子集验证，再扩展到接触/耗散场景 |
+| LaWM 的 DEL transition 是否值得升级为主机制 | 无外力、耗散、接触和形变场景不满足同一个 unforced variational assumption，且需要二阶状态 | 先用 projector + 条件损失跑通，再在 physics-clean 子集做 DEL residual/solver 消融 |
 | 能量/动量是否可作为辅助 loss | 掉落、摩擦、碰撞、外力和非弹性接触会改变机械能 | 由数据字段建立 `M_conservative`，先作为诊断，再决定是否反传 |
-| 二阶 latent transition 如何初始化 | LaWM 需要 `q_{k-1}, q_k`，PhiZero 原生 reasoner 只有首帧和 caption | 比较双观测初始化、相邻 token block 初始化和学习初速度 |
+| 二阶 latent transition 如何初始化 | LaWM 需要 `q_{k-1}, q_k`，PhiZero 原生 reasoner 只有首帧和 caption | 仅在 DEL 增强实验中比较双观测初始化、相邻 token block 初始化和学习初速度 |
 | render → re-encode 是否值得 | 它会重新引入 decoder 成本和渲染误差，也可能改变 token 分布 | 必须和 token-only rollout、hidden-state carry rollout 对照 |
 | PhiZero 原训练集是否可获得 | 公开代码不重发 5M reasoner 训练集；重新训练可能只能用自备 JSONL | 先记录可下载数据、许可证和存储预算 |
 | PhiZero passive baseline 如何设 prompt | 原 Reasoner 输入包含 caption/action intent；纯被动预测需要固定 prompt 规则 | 在 matched-data 里固定 caption 生成策略或使用 GT caption |
@@ -285,11 +288,12 @@ LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数�
 
 - PhiZero tokenizer/decoder 冻结；
 - Reasoner 上增加层级离散 MCP heads；
-- LaWM 风格的 latent Lagrangian、DEL residual 和有限步 differentiable solver；
 - probe 决定连续 generalized coordinate 到 benchmark 状态的 projection head；
-- 条件化 energy/momentum loss 作为辅助项和消融；
+- 状态 grounding、block 边界连续性和条件化 energy/momentum loss；
 - token-only、hidden-state carry、render-reencode 三种 rollout 对照；
 - 4s 到 32s 的长度课程和外推评测。
+
+LaWM 风格的 latent Lagrangian、DEL residual 和有限步 differentiable solver 放入后续增强/消融；只有 solver 真正产生下一状态时，才使用“hybrid LaWM variant”的表述。
 
 暂缓进入主方法：
 
@@ -304,7 +308,8 @@ LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数�
 |---|---|---|
 | 离散 transition physical token | 核心表示 | 必做；与连续 latent、pixel 和 object-state baseline 对照 |
 | Hierarchical multi-horizon token prediction（MCP/MTP） | 核心训练目标 | 必做；高层 chunk CE + 低层 block CE |
-| LaWM-style variational transition | 核心物理机制 | 必做；DEL-defined rollout，报告 DEL residual 和长程稳定性 |
+| Projector + observable physics constraints | 物理一致性核心支撑 | 必做；状态/连续性/条件化能量约束，报告长程稳定性 |
+| LaWM-style variational transition | LaWM 借鉴的增强机制 | 后续消融；只有 solver 真正生成下一状态时才作为 hybrid variant |
 | Persistent physical memory | LaWM context/实现机制 | 必做；记录跨 block 状态、阶段和不确定性 |
 | Boundary/composition/global consistency | 物理一致性辅助机制 | 必做；验证窗口拼接和递归组合 |
 | Projection/state grounding | 可观测性支撑项 | 由 benchmark 标签决定输出变量和监督形式 |
@@ -315,7 +320,7 @@ LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数�
 | token 重复惩罚 | 解码技巧 | 只有出现重复退化时才加 |
 | 能量/动量损失 | 域特定物理先验 | 只在有质量、速度、接触和外力定义的仿真数据上启用 |
 
-首轮实验只保留一条清晰增量链：`local AR → hierarchical MCP → MCP + LaWM transition → MCP + LaWM + projection → full model (+ conditional energy)`。scheduled sampling、历史噪声、RAG、熵正则和 render-reencode 作为单独消融，不能与主方法同时无控制地堆叠。
+首轮实验只保留一条清晰增量链：`local AR → hierarchical MCP → MCP + projector/state grounding → MCP + conditional smoothness/physics → optional LaWM DEL ablation`。scheduled sampling、历史噪声、RAG、熵正则和 render-reencode 作为单独消融，不能与主方法同时无控制地堆叠。
 
 ### 7.2.1 可选增强的边界
 
@@ -329,7 +334,18 @@ LaWM 的二阶 transition 需要两个相邻 latent states。首轮必须在数�
 
 ### 7.3 物理一致性损失与诊断的边界
 
-LaWM 风格的物理约束优先作用在 transition rule：
+主线的物理约束作用在 projector 输出的可观测状态和 block 边界：
+
+```text
+q_k = P(e_k)
+v_k = (q_k - q_{k-1}) / h
+L_smooth = ||q_{k+1} - 2q_k + q_{k-1}||²
+L_energy = M_conservative · drift(E(q_k, v_k))
+```
+
+这里 `q` 是学习到的中间状态，`L_smooth` 只表达轨迹连续性，`L_energy` 只在数据条件允许时启用。能量约束可以降低漂移，但不能单独保证正确的物理转移，也不能在存在外力、摩擦或非弹性碰撞时强行设成零漂移。
+
+LaWM 增强分支才使用变分 transition：
 
 ```text
 L_d(q_k, q_{k+1}; η)
@@ -337,7 +353,7 @@ R_DEL = D2 L_d(q_{k-1}, q_k; η) + D1 L_d(q_k, q_{k+1}; η)
 q̂_{k+1} = Solve_N(q̂_{k-1}, q̂_k; η)
 ```
 
-因此 `L_DEL` 不是生成完成后再优化整条轨迹的 post-hoc refinement。预测的下一状态应由有限步 DEL solver 产生，再由 token head 生成离散 physical language。
+在这个增强分支中，`L_DEL` 才是作用量驻定条件；如果下一状态仍然由普通 Reasoner 产生，`L_DEL` 只是 auxiliary residual，不能称为完整 LaWM transition。只有在有限步 DEL solver 产生 `q̂_{k+1}`、再由 token head 生成离散 physical language 时，才使用“hybrid LaWM variant”的表述。
 
 投影头和能量项承担不同角色：
 

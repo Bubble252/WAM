@@ -176,9 +176,9 @@ MCP 的“多 chunk 并行”首先指训练时同时提供多个未来 block �
 
 如果没有 block verification 或 speculative decoding，不能把 MCP 写成推理加速方法。
 
-### 5.0.1 LaWM 风格的层级物理 transition
+### 5.0.1 Projector 与 LaWM 借鉴的物理约束
 
-物理一致性的核心不再是对普通 token transition 添加一个事后能量惩罚，而是借鉴 LaWM：在连续 generalized coordinate 上学习离散 Lagrangian，并用离散 Euler--Lagrange（DEL）条件定义下一状态的 rollout transition。PhiZero 的离散 token 仍然是训练目标和对外接口。
+首轮将 LaWM 当作物理约束和诊断的参考，而不是直接把 DEL solver 放进主 rollout。PhiZero 的离散 token 仍然是训练目标和对外接口；Reasoner 负责预测下一段 token，projector 把 token block/chunk 表示接到可观测状态。
 
 ```text
 PhiZero token blocks
@@ -190,43 +190,14 @@ PhiZero token blocks
         block/chunk embedding e_k
                 │
                 ▼
-        q_k = projection(e_k)       # learned generalized coordinate
+        projector: e_k → q_k (and v_k)
                 │
-                ▼
-        L_d(q_k, q_{k+1}; η), DEL residual, finite solver
-                │
-                ▼
-        q̂_{k+1} → token heads → future physical-language tokens
+                ├── state/event grounding
+                ├── block boundary and trajectory smoothness
+                └── conditional energy/momentum residual
 ```
 
-LaWM 中的 `q` 是学习到的 generalized coordinate，不默认等于真实 `(x,y,vx,vy)`；投影头是否能读出这些变量由数据 schema、probe 和 benchmark 决定。不能把整数 token id 直接当作可微物理坐标。
-
-离散 Lagrangian 可以采用 LaWM 的最小结构：
-
-```text
-v_k = (q_{k+1} - q_k) / h
-q̄_k = (q_k + q_{k+1}) / 2
-L_d(q_k, q_{k+1}; η)
-    = h [0.5 * v_kᵀ Mθ(q̄_k, η) v_k - Vθ(q̄_k, η)]
-```
-
-其中 `Mθ` 使用正值对角质量参数化，`Vθ` 是标量势能网络。sequence-level context 使用相邻 latent state 推断，并在一个 rollout horizon 内保持不变：
-
-```text
-η = gρ(q_{k-1}, q_k, q_k - q_{k-1})
-```
-
-下一状态不是先由普通网络生成、再进行整条轨迹优化，而是由有限步可微 DEL solver 得到：
-
-```text
-R_DEL =
-    D2 L_d(q_{k-1}, q_k; η)
-  + D1 L_d(q_k, q_{k+1}; η)
-
-q̂_{k+1} = Solve_N(q̂_{k-1}, q̂_k; η)
-```
-
-二阶 transition 需要两个相邻 latent states。初始化方式必须在 schema audit 中明确：两个观测/token blocks、首个 chunk 内的相邻 blocks，或由首帧和 caption 预测初始速度；不能隐含假设为已解决。
+`q` 是学习到的 generalized coordinate 或 benchmark 状态表示，不默认等于真实 `(x,y,vx,vy)`。不能把整数 token id 直接当作可微物理坐标。主线仍由离散 token CE 决定预测，projector 只提供可观测的状态锚点。
 
 #### Projection/state grounding
 
@@ -240,30 +211,43 @@ q̂_{k+1} = Solve_N(q̂_{k-1}, q̂_k; η)
 
 这里的 `d` 和状态维度 `s` 都必须从 checkpoint 与 benchmark schema 读取。`R²` 只作为工程诊断，不能预先规定所有数据都必须预测 `(x,y,vx,vy)`。多物体场景仍需明确单主对象、固定 object id 或 permutation-invariant set 对齐。
 
-#### Combined objective
+#### 主线 combined objective
 
 ```text
 L_total =
     L_AR
   + λ_block L_block
   + λ_chunk L_chunk
-  + λ_lat L_lat
-  + λ_DEL L_DEL
-  + λ_reg L_mass
   + λ_state M_state L_state
+  + λ_smooth L_smooth
   + λ_energy M_conservative L_energy
 ```
 
 - `L_AR`：PhiZero 原始 next-token CE；
 - `L_block`：32-token transition block 的局部多步 CE；
 - `L_chunk`：下一个 256-token chunk 的 CE；
-- `L_lat`：预测 generalized coordinate 与未来 token/观测编码得到的 stop-gradient latent 对齐；
-- `L_DEL`：离散 Euler--Lagrange residual；
-- `L_mass`：质量矩阵的参数正则；
 - `L_state`：只有 benchmark 提供状态标签时启用；
+- `L_smooth`：相邻预测状态或 block 边界的连续性约束，不等同于 stationary-action 条件；
 - `L_energy`：只有质量、速度、接触、外力等字段足够完整时启用。
 
-`M_state` 和 `M_conservative` 是数据条件 mask。LaWM 的 `DEL residual` 是 transition mechanism 的约束，不能和条件化 energy loss 混为同一项。
+`M_state` 和 `M_conservative` 是数据条件 mask。能量约束只在适用场景启用，不能对摩擦、外力或非弹性碰撞片段强行要求零漂移。
+
+#### LaWM DEL 增强消融
+
+在主线 projector 跑通后，再增加 learned discrete Lagrangian 和 `L_DEL` residual：
+
+```text
+v_k = (q_{k+1} - q_k) / h
+q̄_k = (q_k + q_{k+1}) / 2
+L_d(q_k, q_{k+1}; η)
+    = h [0.5 * v_kᵀ Mθ(q̄_k, η) v_k - Vθ(q̄_k, η)]
+
+R_DEL =
+    D2 L_d(q_{k-1}, q_k; η)
+  + D1 L_d(q_k, q_{k+1}; η)
+```
+
+如果下一状态仍由普通 Reasoner 生成，`L_DEL` 只是 auxiliary residual；只有由有限步 DEL solver 产生 `q̂_{k+1}`、再由 token head 生成 physical-language tokens，才称为 hybrid LaWM variant。二阶初始化必须在 schema audit 中明确：两个观测/token blocks、首个 chunk 内的相邻 blocks，或由首帧和 caption 预测初速度。
 
 同时报告两类能量：
 
@@ -272,7 +256,7 @@ E_latent(q,v) = 0.5 * vᵀ Mθ(q,η) v + Vθ(q,η)
 E_phys = simulator-defined kinetic + potential + contact/work terms
 ```
 
-`E_latent` 用于 LaWM 机制诊断；`E_phys` 只在仿真器提供对应字段时计算。真实视频没有可靠质量、三维速度和外力时，不强行计算 `E_phys`。
+`E_latent` 用于 LaWM 增强的机制诊断；`E_phys` 只在仿真器提供对应字段时计算。真实视频没有可靠质量、三维速度和外力时，不强行计算 `E_phys`。
 
 ### 5.0.2 三种长 rollout 模式
 
@@ -393,7 +377,7 @@ rollout length → latency and GPU cost
 - consequence-only predictor（不渲染未来视频）；
 - oracle simulator state（仅作为上界，不作为公平 baseline）。
 
-阶段一关键消融：one-step passive、flat long AR、hierarchical MCP、MCP + LaWM transition、MCP + projection/state grounding、MCP + LaWM + projection、full model + conditional energy、hidden-state carry、render-reencode、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
+阶段一关键消融：one-step passive、flat long AR、hierarchical MCP、MCP + projector/state grounding、MCP + conditional physics、optional MCP + DEL residual、optional hybrid DEL solver、hidden-state carry、render-reencode、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
 
 ## 8. 可复现记录
 

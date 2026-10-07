@@ -23,7 +23,7 @@
 3. **latent action 与 physical language 要区分**：latent action 主要表示“采取了什么动作/控制效果”，physical language 试图表示“世界如何演化”。实验必须加入无动作观察、同动作不同场景、同转移不同外观三种对照，避免把二者混为一谈。
 4. **评价应从视频质量转为后果质量**：至少需要 multi-step state error、事件/接触 F1、反事实动作排序、闭环 success、uncertainty calibration 和推理成本；视频只作为失败审计或可视化。
 5. **最有风险的是因果幻觉**：renderer 可以把错误 latent 变成视觉上连贯的视频。必须使用错动作、错 token、局部关系干预和遮挡测试，验证模型的因果敏感性。
-6. **物理一致性不能只写成能量正则**：LaWM 的关键差异是用离散 Euler--Lagrange 条件定义 latent transition。对 WAM，LaWM 应作为物理 rollout mechanism，projection/state grounding 和条件化能量项作为辅助分支；能量 drift 与 PIS 作为独立诊断。
+6. **物理一致性不能只写成能量正则**：LaWM 的关键差异是用离散 Euler--Lagrange 条件定义 latent transition。WAM 首轮采用 projector、状态/连续性约束和条件化能量项；LaWM 的 `L_DEL`/solver 作为独立增强与消融。只有 solver 真正定义下一 latent state 时，才把该配置称为 hybrid LaWM variant；能量 drift 与 PIS 始终作为独立诊断。
 
 ## 3. 形成的可检验 idea
 

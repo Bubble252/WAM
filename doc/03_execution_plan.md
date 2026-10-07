@@ -44,7 +44,7 @@ git push  # 只有已配置 origin 且用户希望同步时执行
 | P1 | PhiZero 代码和论文接口审计 | repo 状态、依赖、入口、许可证报告 | [ ] |
 | P2 | 最小 tokenizer/表示 smoke test | token 统计、重建/预测 sanity check | [ ] |
 | P3 | 不渲染像素的 dynamics baseline | latent/物理语言 multi-step 预测 | [ ] |
-| P4 | HG-PLM 长程 Reasoner | 层级 MCP、LaWM transition、状态 grounding、长 rollout | [ ] |
+| P4 | HG-PLM 长程 Reasoner | 层级 MCP、projector/物理约束、长 rollout；LaWM DEL 为后续增强 | [ ] |
 | P5 | 结构化事件图扩展 | graph/event ablation | [ ] |
 | P6 | 可选 renderer 审计闭环 | 失败样本渲染、跨外观/embodiment | [ ] |
 | P7 | 论文级对照和结论 | 等算力表、失败案例、idea 选择 | [ ] |
@@ -210,9 +210,9 @@ PhiZero passive/adapted
 Pixel/video predictor
 Ours one-step passive
 Ours hierarchical MCP
-Ours hierarchical MCP + LaWM transition
-Ours hierarchical MCP + LaWM + projection/state grounding
-Ours full model + conditional energy
+Ours hierarchical MCP + projector/state grounding
+Ours hierarchical MCP + conditional physics
+Ours optional LaWM DEL ablation
 Ours full model + observation re-anchoring
 ```
 
@@ -258,19 +258,18 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 
 模型不执行动作，只在预测若干步后重新读取真实观测，再预测下一轮未来状态。报告开放环与重新观测版本的状态误差、事件 F1、长时域漂移、窗口边界跳变和每段推理延迟。RAG 只作为无检索/有检索对照，不进入主模型定义。
 
-### Stage 4：LaWM transition、状态 grounding 和条件化物理约束
+### Stage 4：projector、状态 grounding 和条件化物理约束
 
 - [ ] 离散 tokenizer 才启用熵正则，并报告词表利用率而非只报总 loss；
 - [ ] 将 token block/chunk embedding 投影为连续 generalized coordinate；
-- [ ] 实现 LaWM 风格的离散 Lagrangian、DEL residual 和有限步可微 solver；
-- [ ] 使用 `L_lat + L_DEL + L_mass` 训练 variational transition，使物理结构参与 rollout 规则；
 - [ ] 在 benchmark 提供状态标签时启用 `L_state`，不得预先假设统一的 `(x,y,vx,vy)`；
+- [ ] 加入 block 边界连续性 `L_smooth`，先确认 projector 能减少跨窗口跳变；
 - [ ] 仿真器有质量、速度、接触和外力时，再通过 `M_conservative` 启用能量/动量辅助 loss；
 - [ ] 对摩擦、碰撞、动作做功和外力显式建模，不能默认“总能量恒定”；
-- [ ] 单独记录 `DEL residual`、latent energy drift、simulator physical energy drift、PIS 和 state RMSE；
+- [ ] 单独记录 state RMSE、boundary jump、latent/physical energy drift、PIS 和 event metrics；
 - [ ] token 重复惩罚只在固定 horizon 自回归解码出现重复时启用。
 
-阶段一关键消融：one-step passive、flat long AR、hierarchical MCP、MCP + LaWM transition、MCP + projection/state grounding、MCP + LaWM + projection、full model + conditional energy、persistent memory、transition composition、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
+阶段一关键消融：one-step passive、flat long AR、hierarchical MCP、MCP + projector/state grounding、MCP + conditional physics、optional MCP + DEL residual、optional hybrid DEL solver、persistent memory、transition composition、scheduled sampling、history-token noise、observation re-anchoring、无 first-frame condition、无离散瓶颈、无结构化关系、无 uncertainty head、无 renderer、短/长 horizon、随机/错配 token、遮挡与分布外观测。DAgger、action condition 和 MPC 属于后置控制阶段。
 
 动作条件的 DAgger、MPC 和控制回报评价保留到 Future 阶段，不作为当前训练配方的必需项。
 
@@ -285,7 +284,7 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 - [ ] **MCP 推理含义**：区分 training-only MCP、parallel proposal + verification 和普通递归 AR，不能把训练多步监督直接写成推理加速；
 - [ ] **chunk 时间尺度**：从实际 temporal stride 推导 transition block 的秒数，不能直接假设 0.25 秒或 token-level 物理时间；
 - [ ] **prompt 策略**：PhiZero Reasoner 需要 caption/action intent；纯被动长预测必须固定 prompt 生成规则，避免 baseline 因 prompt 不公平；
-- [ ] **LaWM transition 适用条件**：确定 generalized coordinate 的层级、二阶 rollout 的初始两状态、context `η` 的保持范围、DEL solver 迭代数和稳定性诊断；
+- [ ] **LaWM 增强适用条件**：若 projector 主线有效，再确定 generalized coordinate 的层级、二阶 rollout 的初始两状态、context `η` 的保持范围、DEL solver 迭代数和稳定性诊断；
 - [ ] **物理监督适用条件**：由 benchmark schema 决定 `L_state`、事件 loss 和 `L_energy`，使用 `M_state`/`M_conservative`，不能预先假设所有数据都有 `(x,y,vx,vy)`；
 - [ ] **闭环成本**：render-reencode 必须报告延迟、显存和 round-trip token drift，并与 token-only/hidden-state carry 对照；
 - [ ] **novelty 检索**：对“离散 physical token + long-horizon + explicit physics residual”做 scoop check 后再使用“第一个”表述；
@@ -299,7 +298,7 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 | Phyco 126K | PhiZero 论文把它列为 tokenizer SFT 的仿真来源 | token/block 表示、LaWM 状态对齐候选 | 是否公开 GT position/velocity、object id、相机坐标、长序列相邻片段 |
 | TDW / Physion / Physion++ | 可作为独立仿真/视觉物理数据源 | 投影头补充、跨域测试 | 状态字段、坐标系、对象追踪和 train/test split |
 | CLEVRER / ComPhy | 碰撞和事件推理数据 | event probe、碰撞专项 | 是否有足够长轨迹和可对齐状态 |
-| IsaacLab / MuJoCo 自建轨迹 | 可直接导出 qpos/qvel/contact/force | 长轨迹训练、LaWM transition、状态 grounding、条件化物理残差、长度外推 | 场景、质量、外力、摩擦、初始两状态和渲染设置固定 |
+| IsaacLab / MuJoCo 自建轨迹 | 可直接导出 qpos/qvel/contact/force | 长轨迹训练、状态 grounding、条件化物理残差、可选 DEL 增强、长度外推 | 场景、质量、外力、摩擦、初始两状态和渲染设置固定 |
 | Physion / Physics-IQ / PhyGround / WorldModelBench | 主要是评测或理解基准 | 保持短程能力和物理事件评测 | 是否能把 token prediction 映射到统一指标 |
 
 “PhiZero 原训练集”和“Phyco 有 GT 状态”在当前仓库审计中都不能自动视为已获得；在数据 manifest 完成前，只能写成计划用途，不能写成已可训练资源。
@@ -324,12 +323,13 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 
 ### Step 3：投影头与条件化物理残差
 
-- [ ] 在 hierarchical MCP 上先加入 LaWM-style generalized coordinate、discrete Lagrangian 和 DEL solver；
-- [ ] 训练 `L_lat + L_DEL + L_mass`，检查二阶 rollout 是否降低长程 drift；
-- [ ] 再加入 projection/state grounding，使用 benchmark 提供的状态/事件标签；
-- [ ] 最后在 `M_conservative=1` 的仿真子集加入 conditional energy/momentum loss；
+- [ ] 在 hierarchical MCP 上加入 projector，使用 benchmark 提供的状态/事件标签训练 `L_state`；
+- [ ] 加入 block boundary / trajectory smoothness，检查是否降低长程 drift；
+- [ ] 在 `M_conservative=1` 的仿真子集加入 conditional energy/momentum loss，并扫描 `λ_energy`；
 - [ ] 对比 token embedding、block embedding、Reasoner hidden state 作为 `q` 的输入；
-- [ ] 分别报告 token CE、chunk/block CE、DEL residual、latent energy drift 和 benchmark physical metrics。
+- [ ] 分别报告 token CE、chunk/block CE、state RMSE、boundary jump、energy drift 和 benchmark physical metrics；
+- [ ] 主线稳定后，再把 `L_DEL` residual 作为 LaWM-inspired auxiliary ablation；
+- [ ] 只有 residual 有收益且二阶初始化可控时，才实现 hybrid DEL solver，并单独报告 solver 成本。
 
 ### Step 4：长 rollout 与重锚定
 
@@ -340,9 +340,9 @@ L_MCP = Σ_h w_h · CE(z_{t+h}, pθ(z_{t+h} | o_{≤t}, z_{t+1:t+h-1}))
 
 ### Step 5：主实验与消融
 
-- [ ] 主配置：PhiZero original、hierarchical MCP、+LaWM transition、+LaWM+projection、full model、full model+reanchor；
+- [ ] 主配置：PhiZero original、hierarchical MCP、+projector/state grounding、+conditional physics、optional +DEL residual、full model+reanchor；
 - [ ] MCP ablation：corruption rate、fusion layers、head depth、initialization；
-- [ ] LaWM ablation：无 DEL transition、post-hoc trajectory refinement、solver iterations、无 context `η`、无 mass conditioning；
+- [ ] LaWM ablation：无 `L_DEL`、`L_DEL` residual、hybrid DEL solver、solver iterations、无 context `η`、无 mass conditioning；
 - [ ] projection/physics ablation：A vs B、`λ_state`、`λ_energy`、token/block embedding vs hidden state；
 - [ ] 主曲线：trajectory/state error、event F1、boundary jump、DEL residual、latent/physical energy drift、PIS、latency vs horizon；
 - [ ] 保原榜：Physics-IQ Verified、PhyGround、WorldModelBench，确认短程能力没有明显下降。
