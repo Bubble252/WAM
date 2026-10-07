@@ -393,6 +393,10 @@ WorldOdysseyBench               ← Future 控制阶段
 ### 6.7.1 设计原则
 
 - [ ] 模型输入不含动作；`ctrl`、`xfrc_applied` 和接触冲量只作为 simulator metadata、物理诊断和后置控制数据；
+- [ ] 大规模数据生成、视频渲染和训练只在 101 服务器执行，默认通过 SSH 别名 `vla101` 进入；本地工作区不运行长任务；
+- [ ] 任务启动前使用 `nvidia-smi --query-gpu` 和 compute-process 查询实际 GPU 占用，选择空闲 GPU 后显式设置 `CUDA_VISIBLE_DEVICES`；等待空闲时轮询，不抢占、不终止已有任务；
+- [ ] 远端数据根目录必须在 101 上首次审计时确认，不能直接假设其他项目的路径；manifest 记录 host、GPU index/UUID、远端路径和生成时间；
+- [ ] 原始 state/video 和大规模日志保留在 101，Git 只提交生成器、配置、schema、manifest 摘要、校验报告和远端路径说明；
 - [ ] 所有轨迹保存初始状态和高频 simulator state，8 FPS 视频只作为 PhiZero 对齐和视觉评测接口；
 - [ ] 训练和测试按轨迹/模板/参数组合切分，不能按相邻帧随机切分；
 - [ ] 每条轨迹带 `M_state`、`M_conservative`、`M_momentum`，物理 loss 由 mask 决定；
@@ -487,6 +491,7 @@ mujoco_wam_v1/
 ### 6.7.6 验收与 Git
 
 - [ ] 12 类场景各至少生成 50 条 smoke 轨迹；
+- [ ] 记录 101 服务器主机名、远端数据根目录、GPU index/UUID 和空闲检查日志；
 - [ ] 自动检查无 NaN、穿透异常、能量/动量 mask 与外力字段一致；
 - [ ] 随机抽查 100 条视频，确认 object ID、mask、事件时间和状态数组对齐；
 - [ ] 用解析场景对照自由落体、简谐振子、无摩擦摆的误差；
