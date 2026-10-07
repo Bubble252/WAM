@@ -1,0 +1,26 @@
+{
+  "dataset": "mujoco_wam_v0",
+  "version": "0.1",
+  "duration_seconds": 32.0,
+  "sim_timestep": 0.004166666666666667,
+  "state_fps": 30,
+  "video_fps": 8,
+  "render_width": 128,
+  "render_height": 128,
+  "max_contacts": 16,
+  "trajectories_per_family": 300,
+  "master_seed": 20261007,
+  "token_alignment": {
+    "token_count": 256,
+    "tokens_per_block": 32,
+    "num_blocks": 8,
+    "token_values_available": false
+  },
+  "remote": {
+    "host_alias": "vla101",
+    "remote_root": "/vepfs-mlp2/c20250405/400040/transfer/WAM",
+    "data_root": "/vepfs-mlp2/c20250405/400040/transfer/WAM/data/mujoco_wam_v0",
+    "require_idle_gpu_for_accelerated_jobs": true,
+    "never_preempt_existing_jobs": true
+  }
+}

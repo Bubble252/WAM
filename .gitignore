@@ -7,3 +7,7 @@ logs/
 *.safetensors
 *.ckpt
 *.pth
+data/mujoco_wam_v0/
+*.mp4
+*.npz
+*.npy
