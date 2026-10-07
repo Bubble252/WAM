@@ -166,6 +166,14 @@ def _energy_and_momentum(
             for body_id in range(1, model.nbody)
         )
     )
+    for joint_id in range(model.njnt):
+        stiffness = float(model.jnt_stiffness[joint_id])
+        if stiffness <= 0.0:
+            continue
+        qpos_addr = int(model.jnt_qposadr[joint_id])
+        reference = float(model.qpos_spring[joint_id])
+        displacement = float(data.qpos[qpos_addr] - reference)
+        potential += 0.5 * stiffness * displacement * displacement
     linear = np.zeros(3, dtype=np.float64)
     angular = np.zeros(3, dtype=np.float64)
     for body_id in range(1, model.nbody):
@@ -216,10 +224,13 @@ def _event_records(
     body_names: Sequence[str],
     geom_names: Sequence[str],
     body_xpos: np.ndarray,
+    body_xquat: np.ndarray,
     body_linear_velocity: np.ndarray,
     contact_valid: np.ndarray,
     contact_geom_ids: np.ndarray,
+    geom_body_ids: np.ndarray,
     qvel: np.ndarray,
+    body_angular_velocity: np.ndarray,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     previous_pairs: set[Tuple[int, int]] = set()
@@ -233,20 +244,97 @@ def _event_records(
             pairs.add(pair)
             if pair not in previous_pairs:
                 geom_a, geom_b = pair
+                body_a = int(geom_body_ids[geom_a]) if 0 <= geom_a < len(geom_body_ids) else 0
+                body_b = int(geom_body_ids[geom_b]) if 0 <= geom_b < len(geom_body_ids) else 0
+                body_ids = [body_id for body_id in (body_a, body_b) if body_id > 0]
+                involved = [body_names[body_id] for body_id in body_ids if body_id < len(body_names)]
+                is_floor_contact = "floor" in (
+                    geom_names[geom_a] if 0 <= geom_a < len(geom_names) else "",
+                    geom_names[geom_b] if 0 <= geom_b < len(geom_names) else "",
+                )
                 records.append(
                     {
                         "type": "collision",
                         "frame": frame,
                         "time": float(times[frame]),
-                        "object_ids": [
+                        "object_ids": involved or [
                             geom_names[geom_a] if 0 <= geom_a < len(geom_names) else str(geom_a),
                             geom_names[geom_b] if 0 <= geom_b < len(geom_names) else str(geom_b),
                         ],
                         "before": None,
                         "after": {
                             "contact": True,
-                            "position": body_xpos[frame].tolist(),
+                            "position": body_xpos[frame, body_ids].tolist() if body_ids else [],
                         },
+                    }
+                )
+                if is_floor_contact:
+                    records.append(
+                        {
+                            "type": "support",
+                            "frame": frame,
+                            "time": float(times[frame]),
+                            "object_ids": involved,
+                            "before": {"contact": False},
+                            "after": {"contact": True},
+                        }
+                    )
+                if body_ids and np.max(speed[frame, np.asarray(body_ids) - 1]) > 0.1:
+                    records.append(
+                        {
+                            "type": "sliding",
+                            "frame": frame,
+                            "time": float(times[frame]),
+                            "object_ids": involved,
+                            "before": {"contact": False},
+                            "after": {"speed": speed[frame, np.asarray(body_ids) - 1].tolist()},
+                        }
+                    )
+                if body_ids and np.max(
+                    np.linalg.norm(body_angular_velocity[frame, body_ids], axis=-1)
+                ) > 0.5:
+                    records.append(
+                        {
+                            "type": "rolling",
+                            "frame": frame,
+                            "time": float(times[frame]),
+                            "object_ids": involved,
+                            "before": {"contact": False},
+                            "after": {"angular_speed": np.linalg.norm(
+                                body_angular_velocity[frame, body_ids], axis=-1
+                            ).tolist()},
+                        }
+                    )
+        if frame > 0:
+            previous_vertical = body_linear_velocity[frame - 1, 1:, 2]
+            current_vertical = body_linear_velocity[frame, 1:, 2]
+            if np.any((previous_vertical < -0.05) & (current_vertical > 0.05)) and pairs:
+                records.append(
+                    {
+                        "type": "bounce",
+                        "frame": frame,
+                        "time": float(times[frame]),
+                        "object_ids": body_names[1:],
+                        "before": {"vertical_velocity": previous_vertical.tolist()},
+                        "after": {"vertical_velocity": current_vertical.tolist()},
+                    }
+                )
+            previous_upright = 1.0 - 2.0 * (
+                body_xquat[frame - 1, 1:, 1] ** 2 + body_xquat[frame - 1, 1:, 2] ** 2
+            )
+            current_upright = 1.0 - 2.0 * (
+                body_xquat[frame, 1:, 1] ** 2 + body_xquat[frame, 1:, 2] ** 2
+            )
+            toppled = (previous_upright > 0.85) & (current_upright <= 0.85)
+            for body_offset in np.flatnonzero(toppled):
+                records.append(
+                    {
+                        "type": "topple",
+                        "frame": frame,
+                        "time": float(times[frame]),
+                        "object_ids": [body_names[int(body_offset) + 1]],
+                        "before": {"upright": float(previous_upright[body_offset])},
+                        "after": {"upright": float(current_upright[body_offset])},
                     }
                 )
         if pairs and frame > 0:
@@ -380,8 +468,8 @@ def generate_trajectory(
         "angular_momentum": np.zeros((n_state, 3), dtype=np.float64),
         "external_work": np.zeros(n_state, dtype=np.float64),
         "M_state": np.ones(n_state, dtype=np.uint8),
-        "M_conservative": np.full(n_state, int(scenario.conservative_candidate), dtype=np.uint8),
-        "M_momentum": np.full(n_state, int(scenario.momentum_candidate), dtype=np.uint8),
+        "M_conservative": np.zeros(n_state, dtype=np.uint8),
+        "M_momentum": np.zeros(n_state, dtype=np.uint8),
     }
 
     previous_xpos = np.zeros((nbody, 3), dtype=np.float64)
@@ -451,9 +539,31 @@ def generate_trajectory(
             arrays["total_energy"][state_cursor] = total
             arrays["linear_momentum"][state_cursor] = linear_momentum
             arrays["angular_momentum"][state_cursor] = angular_momentum
+            work = 0.0
             if state_cursor:
                 work = float(np.dot(data.qfrc_applied, data.qvel) * dt)
-                arrays["external_work"][state_cursor] = arrays["external_work"][state_cursor - 1] + work
+            previous_work = arrays["external_work"][state_cursor - 1] if state_cursor else 0.0
+            arrays["external_work"][state_cursor] = previous_work + work
+            damping = float(scenario.parameters.get("damping", 0.0))
+            has_external_force = bool(
+                np.any(np.abs(data.qfrc_applied) > 1e-10)
+                or np.any(np.abs(data.xfrc_applied) > 1e-10)
+                or np.any(np.abs(data.ctrl) > 1e-10)
+            )
+            no_active_contact = int(contacts["count"]) == 0
+            no_external_acceleration = float(np.linalg.norm(model.opt.gravity)) <= 1e-10
+            arrays["M_conservative"][state_cursor] = int(
+                scenario.conservative_candidate
+                and damping <= 1e-10
+                and no_active_contact
+                and not has_external_force
+            )
+            arrays["M_momentum"][state_cursor] = int(
+                scenario.momentum_candidate
+                and no_active_contact
+                and not has_external_force
+                and no_external_acceleration
+            )
             previous_xpos = xpos
             previous_xquat = xquat
             previous_time = data_time
@@ -494,10 +604,13 @@ def generate_trajectory(
         body_names=body_names,
         geom_names=geom_names,
         body_xpos=arrays["body_xpos"],
+        body_xquat=arrays["body_xquat"],
         body_linear_velocity=arrays["body_linear_velocity"],
         contact_valid=arrays["contact_valid"],
         contact_geom_ids=arrays["contact_geom_ids"],
+        geom_body_ids=np.asarray(model.geom_bodyid),
         qvel=arrays["qvel"],
+        body_angular_velocity=arrays["body_angular_velocity"],
     )
     event_path = output_root / "events" / f"{trajectory_id}.json"
     event_path.write_text(

@@ -1,0 +1,57 @@
+MuJoCo-WAM 101 environment audit
+Audit date: 2026-10-07
+SSH alias: vla101
+Host observed at audit time: di-20260613120619-84fwm
+User: root
+
+Existing VLA sibling:
+  /vepfs-mlp2/c20250405/400040/transfer/vla_attention
+
+WAM root:
+  /vepfs-mlp2/c20250405/400040/transfer/WAM
+  repo: /vepfs-mlp2/c20250405/400040/transfer/WAM/repo/WAM
+  data: /vepfs-mlp2/c20250405/400040/transfer/WAM/data/mujoco_wam_v0
+  env: /vepfs-mlp2/c20250405/400040/transfer/WAM/envs/mujoco_wam_py311
+  jobs: /vepfs-mlp2/c20250405/400040/transfer/WAM/jobs
+  logs: /vepfs-mlp2/c20250405/400040/transfer/WAM/logs
+
+Python and packages:
+  interpreter: /vepfs-mlp2/c20250405/400040/transfer/WAM/envs/mujoco_wam_py311/bin/python
+  Python: 3.11.x
+  torch: 2.6.0+cu124
+  CUDA reported by torch: 12.4
+  torch.cuda.is_available: True
+  torch.cuda.device_count: 2
+  mujoco: 3.3.7
+  imageio: 2.37.3
+  imageio-ffmpeg: 0.6.0
+
+GPU snapshot at audit time:
+  index=0
+  uuid=GPU-7a7fc403-d1d4-e22e-737b-2bcca37bf583
+  name=NVIDIA A100-SXM4-80GB
+  memory_total_mb=81920
+  memory_used_mb=23661
+  utilization_percent=49
+  selection=busy; do not use
+
+  index=1
+  uuid=GPU-dff9efc0-9ed5-fd74-5fa3-93db21cb7727
+  name=NVIDIA A100-SXM4-80GB
+  memory_total_mb=81920
+  memory_used_mb=4
+  utilization_percent=0
+  selection=idle during the audit; selected by the launcher for smoke rendering
+
+Filesystem snapshot:
+  mount=/vepfs-mlp2/c20250405/400040
+  size=3.1P
+  used=2.8P
+  available=351T
+  use=89%
+
+Execution policy:
+  - The WAM launcher checks memory, utilization, and compute processes before use.
+  - It confirms the same GPU is idle twice before setting CUDA_VISIBLE_DEVICES.
+  - It never terminates or preempts existing VLA/other jobs.
+  - Large state/video artifacts and logs stay on 101; Git contains code and manifests only.

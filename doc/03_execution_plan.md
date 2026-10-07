@@ -401,6 +401,8 @@ WorldOdysseyBench               ← Future 控制阶段
 - [ ] 训练和测试按轨迹/模板/参数组合切分，不能按相邻帧随机切分；
 - [ ] 每条轨迹带 `M_state`、`M_conservative`、`M_momentum`，物理 loss 由 mask 决定；
 - [ ] 对摩擦、阻尼、非弹性碰撞、固定地面接触和外力，不使用无条件的 `E_t=E_0`；
+- [ ] `M_momentum` 只在无重力、无接触、无外力的全局动量守恒区间置 1；有重力的碰撞
+      轨迹仍保存碰撞前后速度和冲量，但不把全局动量漂移误标为可约束区间；
 - [ ] 记录生成 seed、MuJoCo 版本、MJCF、solver、integrator 和 camera 配置，确保可复现。
 
 ### 6.7.2 场景家族
@@ -502,6 +504,45 @@ git add doc/01_project_background.md doc/03_execution_plan.md references/manifes
 git commit -m "docs: define benchmark roles and MuJoCo-WAM dataset spec"
 git push
 ```
+
+### 6.7.7 101 服务器落盘与空闲 GPU 运行约定
+
+MuJoCo-WAM 的大规模 state、视频、MJCF、事件文件和运行日志统一放在 101
+服务器，不放在本地 `/home/bubble/类脑计算`。本次已审计并固定以下路径：
+
+```text
+SSH alias:  vla101
+WAM root:  /vepfs-mlp2/c20250405/400040/transfer/WAM
+代码:      /vepfs-mlp2/c20250405/400040/transfer/WAM/repo/WAM
+数据:      /vepfs-mlp2/c20250405/400040/transfer/WAM/data/mujoco_wam_v0
+环境:      /vepfs-mlp2/c20250405/400040/transfer/WAM/envs/mujoco_wam_py311
+任务:      /vepfs-mlp2/c20250405/400040/transfer/WAM/jobs
+日志:      /vepfs-mlp2/c20250405/400040/transfer/WAM/logs
+```
+
+101 上已经存在 VLA 项目目录 `/vepfs-mlp2/c20250405/400040/transfer/vla_attention`；
+WAM 使用同一目录的**兄弟目录**，不修改 VLA 的代码、环境、checkpoint 或数据。
+MuJoCo 仿真主要占用 CPU；视频通过 EGL 使用 GPU。启动前必须检查
+`nvidia-smi` 的显存、利用率和 compute process，连续两次确认同一块 GPU 空闲后才
+设置 `CUDA_VISIBLE_DEVICES`。脚本不杀进程、不抢占任务；如果没有空闲 GPU 就轮询等待。
+
+仓库中的 [`scripts/run_mujoco_wam_101_idle.sh`](../scripts/run_mujoco_wam_101_idle.sh)
+封装了这套规则。同步仓库后，在 101 上运行：
+
+```bash
+cd /vepfs-mlp2/c20250405/400040/transfer/WAM/repo/WAM
+chmod +x scripts/run_mujoco_wam_101_idle.sh
+WAM_TRAJECTORIES_PER_FAMILY=300 \
+WAM_MASTER_SEED=20261007 \
+nohup scripts/run_mujoco_wam_101_idle.sh \
+  > /vepfs-mlp2/c20250405/400040/transfer/WAM/logs/launcher.nohup.log 2>&1 &
+echo $! > /vepfs-mlp2/c20250405/400040/transfer/WAM/jobs/launcher.pid
+```
+
+任务状态写入 `jobs/mujoco_wam_*.json`，完整日志写入 `logs/`。如果只做状态 smoke
+而暂时不渲染视频，可设置 `WAM_NO_VIDEO=1`；正式 v0.1 需要保留 8 FPS 视频，因此不
+设置该变量。正式生成前先运行 10-seed 重现检查和 12 类场景 smoke，再使用同一
+远端数据根目录启动 3,600 条批任务。
 
 ## 7. Future：动作条件反事实规划和控制（后置）
 

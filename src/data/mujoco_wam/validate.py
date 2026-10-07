@@ -88,7 +88,150 @@ def validate_entry(root: Path, entry: Mapping[str, Any]) -> List[str]:
     return errors
 
 
-def validate_dataset(root: Path) -> Dict[str, Any]:
+def _first_entry(
+    entries: Iterable[Mapping[str, Any]],
+    family: str,
+    predicate: Any | None = None,
+) -> Mapping[str, Any] | None:
+    candidates = [
+        entry for entry in entries
+        if entry.get("family") == family and (predicate is None or predicate(entry))
+    ]
+    return sorted(candidates, key=lambda row: str(row.get("trajectory_id", "")))[0] if candidates else None
+
+
+def _body_index(data: Mapping[str, np.ndarray], name: str) -> int:
+    names = [str(value) for value in np.asarray(data["body_names"]).tolist()]
+    try:
+        return names.index(name)
+    except ValueError as exc:
+        raise KeyError(name) from exc
+
+
+def analytic_sanity_checks(
+    root: Path,
+    entries: Iterable[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Run deterministic sanity checks against simple analytic dynamics.
+
+    These checks are deliberately conservative.  They are not a substitute for
+    the simulator's full validation; they only catch broken initialization,
+    gravity, spring, or pendulum wiring before a large batch is accepted.
+    """
+
+    entries = list(entries)
+    checks: Dict[str, Any] = {}
+    errors: List[str] = []
+
+    # Free fall: compare the pre-contact projectile against x(t)=x0+v0*t+1/2*g*t^2.
+    free_entry = _first_entry(entries, "free_fall_projectile")
+    if free_entry is None:
+        errors.append("analytic free-fall check: no free_fall_projectile entry")
+    else:
+        with np.load(root / str(free_entry["paths"]["state"]), allow_pickle=False) as data:
+            body_id = _body_index(data, "target")
+            params = free_entry.get("parameters", {})
+            x0 = np.asarray(params.get("initial_position", data["body_xpos"][0, body_id]), dtype=np.float64)
+            v0 = np.asarray(params.get("initial_velocity", data["qvel"][0, :3]), dtype=np.float64)
+            gravity = np.asarray(data["gravity"], dtype=np.float64)
+            time = np.asarray(data["time"], dtype=np.float64)
+            contact = np.asarray(data["contact_count"]) > 0
+            first_contact = float(time[np.flatnonzero(contact)[0]]) if np.any(contact) else float(time[-1])
+            eligible = (time <= min(first_contact, 0.5)) & ~contact
+            prediction = x0[None, :] + v0[None, :] * time[:, None] + 0.5 * gravity[None, :] * time[:, None] ** 2
+            error = np.linalg.norm(data["body_xpos"][:, body_id, :] - prediction, axis=-1)
+            max_error = float(np.max(error[eligible])) if np.any(eligible) else float("inf")
+            checks["free_fall_projectile"] = {
+                "trajectory_id": free_entry["trajectory_id"],
+                "eligible_frames": int(np.count_nonzero(eligible)),
+                "max_position_error_m": max_error,
+                "tolerance_m": 0.03,
+                "passed": bool(np.any(eligible) and max_error <= 0.03),
+            }
+            if not checks["free_fall_projectile"]["passed"]:
+                errors.append(
+                    "analytic free-fall check failed: "
+                    f"max error {max_error:.6g} m > 0.03 m"
+                )
+
+    # Spring: an undamped slide joint should follow the harmonic oscillator.
+    spring_entry = _first_entry(
+        entries,
+        "spring_oscillator",
+        lambda row: float(row.get("parameters", {}).get("damping", 1.0)) <= 1e-12,
+    )
+    if spring_entry is None:
+        errors.append("analytic spring check: no undamped spring_oscillator entry")
+    else:
+        with np.load(root / str(spring_entry["paths"]["state"]), allow_pickle=False) as data:
+            body_id = _body_index(data, "target")
+            params = spring_entry.get("parameters", {})
+            stiffness = float(params.get("stiffness", 0.0))
+            mass = float(np.asarray(data["body_mass"])[body_id])
+            time = np.asarray(data["time"], dtype=np.float64)
+            position = np.asarray(data["qpos"][:, 0], dtype=np.float64)
+            velocity = float(np.asarray(data["qvel"])[0, 0])
+            omega = float(np.sqrt(max(stiffness, 0.0) / max(mass, 1e-12)))
+            if omega > 0.0:
+                prediction = (
+                    position[0] * np.cos(omega * time)
+                    + velocity / omega * np.sin(omega * time)
+                )
+                eligible = time <= min(8.0, float(time[-1]))
+                max_error = float(np.max(np.abs(position[eligible] - prediction[eligible])))
+            else:
+                max_error = float("inf")
+                eligible = np.zeros_like(time, dtype=bool)
+            checks["spring_oscillator"] = {
+                "trajectory_id": spring_entry["trajectory_id"],
+                "eligible_frames": int(np.count_nonzero(eligible)),
+                "max_position_error_m": max_error,
+                "tolerance_m": 0.12,
+                "passed": bool(np.any(eligible) and max_error <= 0.12),
+            }
+            if not checks["spring_oscillator"]["passed"]:
+                errors.append(
+                    "analytic spring check failed: "
+                    f"max error {max_error:.6g} m > 0.12 m"
+                )
+
+    # Pendulum: for a no-damping simple pendulum, energy should remain bounded.
+    pendulum_entry = _first_entry(
+        entries,
+        "simple_double_pendulum",
+        lambda row: float(row.get("parameters", {}).get("damping", 1.0)) <= 1e-12,
+    )
+    if pendulum_entry is None:
+        errors.append("analytic pendulum check: no undamped pendulum entry")
+    else:
+        with np.load(root / str(pendulum_entry["paths"]["state"]), allow_pickle=False) as data:
+            energy = np.asarray(data["total_energy"], dtype=np.float64)
+            mask = np.asarray(data["M_conservative"], dtype=bool)
+            eligible = mask & (np.asarray(data["time"]) <= 8.0)
+            values = energy[eligible]
+            if values.size:
+                scale = max(abs(float(values[0])), 1e-6)
+                relative_range = float((np.max(values) - np.min(values)) / scale)
+            else:
+                relative_range = float("inf")
+            check_name = "simple_pendulum" if not pendulum_entry.get("parameters", {}).get("double") else "double_pendulum"
+            checks[check_name] = {
+                "trajectory_id": pendulum_entry["trajectory_id"],
+                "eligible_frames": int(values.size),
+                "relative_energy_range": relative_range,
+                "tolerance": 0.20,
+                "passed": bool(values.size >= 10 and relative_range <= 0.20),
+            }
+            if not checks[check_name]["passed"]:
+                errors.append(
+                    "analytic pendulum check failed: "
+                    f"relative energy range {relative_range:.6g} > 0.20"
+                )
+
+    return {"checks": checks, "errors": errors, "valid": not errors}
+
+
+def validate_dataset(root: Path, *, analytic_sanity: bool = False) -> Dict[str, Any]:
     root = Path(root)
     manifest_dir = root / "manifests"
     entries: List[Mapping[str, Any]] = []
@@ -119,6 +262,13 @@ def validate_dataset(root: Path) -> Dict[str, Any]:
         "errors": errors[:200],
         "valid": not errors,
     }
+    if analytic_sanity:
+        analytic = analytic_sanity_checks(root, entries)
+        report["analytic_sanity"] = analytic
+        errors.extend(analytic["errors"])
+        report["errors"] = errors[:200]
+        report["error_count"] = len(errors)
+        report["valid"] = not errors
     (root / "dataset_validation.json").write_text(
         json.dumps(report, indent=2, sort_keys=True),
         encoding="utf-8",
