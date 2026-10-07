@@ -11,3 +11,5 @@ data/mujoco_wam_v0/
 *.mp4
 *.npz
 *.npy
+__pycache__/
+*.pyc
